@@ -296,54 +296,107 @@ def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
     }
 
 
+def get_multicriteria_managerial_insight(sales_class: str, hits_class: str) -> str:
+    """Provide actionable supply chain managerial advice based on BOTH Sales ($) and Hits."""
+    insight_map = {
+        ("A", "A"): "Critical Revenue & Velocity: Continuous daily review, automated replenishment, tight vendor integration, 98-99% service level, prime golden-zone warehouse slotting.",
+        ("A", "B"): "High Revenue, Moderate Velocity: Weekly review, standard safety buffer, automated reordering, high-priority rack placement.",
+        ("A", "C"): "High Dollar, Slow Moving: Periodic review, strict purchasing approval, minimize buffer stock to protect working capital.",
+        ("A", "D"): "High Dollar, Lumpy Demand: Capital-intensive, infrequent demand. Strictly make-to-order (MTO) or contract-on-demand, zero safety stock.",
+        ("B", "A"): "Moderate Revenue, High Velocity: Fast-moving staple. Maintain safety stock buffer to avoid pick line stockouts, ergonomic pick slotting.",
+        ("B", "B"): "Balanced Standard SKU: Moderate sales and volume. EOQ batching with standard periodic review and reorder point.",
+        ("B", "C"): "Moderate Revenue, Slow Velocity: Low pick frequency. Consolidate order cycles, monitor holding costs.",
+        ("B", "D"): "Moderate Revenue, Infrequent Demand: Reorder upon customer order confirmation or low min-max buffer.",
+        ("C", "A"): "Low Revenue, High Velocity (Consumables/Fasteners): Cheap fast movers. Bulk batch purchasing, two-bin visual Kanban replenishment, high service level.",
+        ("C", "B"): "Low Revenue, Moderate Velocity: Low financial risk. Standard periodic review with simplified controls.",
+        ("C", "C"): "Low Revenue, Slow Velocity: Order-up-to periodic review with wide review intervals.",
+        ("C", "D"): "Low Revenue, Infrequent: Candidate for catalog rationalization or minimum stocking.",
+        ("D", "A"): "Low Revenue, High Transactions: Inexpensive supplies. Bulk ordering, minimal inventory management overhead.",
+        ("D", "B"): "Minor Volume SKU: Negligible sales impact. Reorder in small batches as needed.",
+        ("D", "C"): "Slow Moving, Low Value: Review for potential phase-out or vendor return.",
+        ("D", "D"): "Dead Stock / Obsolete Candidates: Minimal revenue and near-zero velocity. Candidate for immediate rationalization, liquidation, or purge."
+    }
+    return insight_map.get((sales_class, hits_class), f"Manage SKU based on dual profile: Sales Class {sales_class} and Hits Class {hits_class}.")
+
+
+def safe_format_currency(val: Any) -> str:
+    """Safely format a value as currency without throwing ValueError."""
+    if val is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return ""
+    except ImportError:
+        pass
+    s = str(val).strip()
+    if not s:
+        return ""
+    try:
+        clean = s.replace("$", "").replace(",", "").strip()
+        return f"${float(clean):,.2f}"
+    except (ValueError, TypeError):
+        return s
+
+
+def safe_format_hits(val: Any) -> str:
+    """Safely format a value as integer hits without throwing ValueError."""
+    if val is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return ""
+    except ImportError:
+        pass
+    s = str(val).strip()
+    if not s:
+        return ""
+    try:
+        clean = s.replace(",", "").strip()
+        return f"{float(clean):,.0f}"
+    except (ValueError, TypeError):
+        return s
+
+
+def safe_format_pct(val: Any) -> str:
+    """Safely format a value as percentage without throwing ValueError."""
+    if val is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return ""
+    except ImportError:
+        pass
+    s = str(val).strip()
+    if not s:
+        return ""
+    try:
+        clean = s.replace("%", "").strip()
+        return f"{float(clean):.1f}%"
+    except (ValueError, TypeError):
+        return s
+
+
 def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
     """
     Validate and classify inventory items using multicriteria classification (Sales ($) and Hits).
     Supports A, B, C, D classifications for both Sales ($) and Hits.
 
-    Column Titles for Results:
-    - Cumulative Sales ($) Total
-    - Percentage Sales ($)
-    - Sales ($) Classification
-    - Cumulative Hits Total
-    - Percentage Hits
-    - Hits Classification
-    - Multicriteria Class
+    Requirements:
+    1. The Final Table does NOT need specific sorting by Sales ($) or Hits (maintains original order).
+    2. Sorting from largest to smallest is performed strictly for the calculations.
+    3. Separate calculation tables show Cumulative Sales ($) Total with Percentage Sales ($),
+       and Cumulative Hits Total with Percentage Hits.
+    4. The Final Table contains only classifications and multicriteria classification (no calculation columns).
+    5. Managerial insights advise on BOTH criteria.
 
     Classification Criteria:
     - A items: 0% < x <= 60%
     - B items: 60% < x <= 80%
     - C items: 80% < x <= 90%
     - D items: 90% < x
-
-    Calculations performed via pandas:
-    1. Identifies and validates Sales ($) and Hits columns flexibly.
-       - Detects explicit 'Sales ($)', 'Sales', 'Annual Sales', 'Revenue ($)'.
-       - If missing but 'Units' and 'Unit Cost' exist, computes Sales ($) = Units * Unit Cost.
-       - Detects explicit 'Hits', 'Hit', 'Picks', 'Frequency', 'Transactions', 'Orders'.
-       - If missing but 'Units' exists, uses 'Units' as Hits proxy.
-       - Detects Item identifier: 'Item Name', 'Product', 'Item Number', 'Item', 'Description', 'SKU', or first column.
-    2. Cleans currency formatting, dollar signs, commas, and whitespace.
-    3. Sorts items from largest to smallest in terms of Sales ($).
-    4. Cumulative Sales ($) Total: starting with largest Sales ($) equaling itself,
-       adding each next largest Sales ($) down the list.
-    5. Percentage Sales ($): (Cumulative Sales ($) Total / Total Sales) * 100.
-    6. Classifies Sales ($) items:
-       - A: 0% < x <= 60%
-       - B: 60% < x <= 80%
-       - C: 80% < x <= 90%
-       - D: 90% < x
-    7. Sorts items from largest to smallest in terms of Hits before calculating:
-       Cumulative Hits Total: running sum of Hits.
-       Percentage Hits: (Cumulative Hits Total / Total Hits) * 100.
-       Classifies Hits items:
-       - A: 0% < x <= 60%
-       - B: 60% < x <= 80%
-       - C: 80% < x <= 90%
-       - D: 90% < x
-    8. Forms Multicriteria Class (e.g. A-A, A-B, B-C, D-D).
-    9. Generates 4x4 cross-tabulation matrix (pd.crosstab) for multicriteria inventory control.
-    10. Generates Class summary distribution tables for both Sales ($) and Hits.
     """
     # Identify columns flexibly
     sales_col = None
@@ -459,31 +512,7 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
     df_result["_sales_clean"] = clean_series(df_result[sales_col])
     df_result["_hits_clean"] = clean_series(df_result[hits_col])
 
-    # 1. Sort items from largest to smallest in terms of Sales ($)
-    df_sorted = df_result.sort_values(
-        by=["_sales_clean", "_hits_clean"],
-        ascending=[False, False]
-    ).reset_index(drop=True)
-
-    # 2. Cumulative Sales ($) Total: starting with largest Sales ($) equaling itself
-    df_sorted["Cumulative Sales ($) Total"] = df_sorted["_sales_clean"].cumsum()
-
-    # 3. Percentage Sales ($): cumulative value divided by total sales value
-    total_sales = float(df_sorted["_sales_clean"].sum())
-    if total_sales > 0:
-        df_sorted["Percentage Sales ($)"] = (df_sorted["Cumulative Sales ($) Total"] / total_sales) * 100.0
-    else:
-        df_sorted["Percentage Sales ($)"] = 0.0
-
-    # Aliases for backward compatibility
-    df_sorted["Cumulative Total"] = df_sorted["Cumulative Sales ($) Total"]
-    df_sorted["Percentage"] = df_sorted["Percentage Sales ($)"]
-
-    # 4. Classify based on criteria:
-    # - A items 0% < x <= 60%
-    # - B items 60% < x <= 80%
-    # - C items 80% < x <= 90%
-    # - D items 90% < x
+    # Classification assignment criteria function
     def assign_class(pct: float) -> str:
         if pct <= 60.0:
             return "A"
@@ -494,12 +523,33 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         else:
             return "D"
 
-    df_sorted["Sales ($) Classification"] = df_sorted["Percentage Sales ($)"].apply(assign_class)
-    df_sorted["Classification"] = df_sorted["Sales ($) Classification"]
+    # =========================================================================
+    # 1. SALES ($) CALCULATIONS (Sorted largest to smallest strictly for calculations)
+    # =========================================================================
+    total_sales = float(df_result["_sales_clean"].sum())
+    df_sales_sorted = df_result.sort_values(
+        by=["_sales_clean", "_hits_clean"],
+        ascending=[False, False]
+    ).copy()
+    df_sales_sorted["Cumulative Sales ($) Total"] = df_sales_sorted["_sales_clean"].cumsum()
+    if total_sales > 0:
+        df_sales_sorted["Percentage Sales ($)"] = (df_sales_sorted["Cumulative Sales ($) Total"] / total_sales) * 100.0
+    else:
+        df_sales_sorted["Percentage Sales ($)"] = 0.0
+    df_sales_sorted["Sales ($) Classification"] = df_sales_sorted["Percentage Sales ($)"].apply(assign_class)
 
-    # 5. Hits classification: Sort Hits values from largest to smallest before calculating
-    total_hits = float(df_sorted["_hits_clean"].sum())
-    df_hits_sorted = df_sorted.sort_values(by=["_hits_clean", "_sales_clean"], ascending=[False, False]).copy()
+    # Dedicated Sales calculation breakdown table
+    sales_calc_cols = [c for c in [name_col, sales_col, "Cumulative Sales ($) Total", "Percentage Sales ($)", "Sales ($) Classification"] if c in df_sales_sorted.columns]
+    sales_calc_df = df_sales_sorted[sales_calc_cols].copy()
+
+    # =========================================================================
+    # 2. HITS CALCULATIONS (Sorted largest to smallest strictly for calculations)
+    # =========================================================================
+    total_hits = float(df_result["_hits_clean"].sum())
+    df_hits_sorted = df_result.sort_values(
+        by=["_hits_clean", "_sales_clean"],
+        ascending=[False, False]
+    ).copy()
     df_hits_sorted["Cumulative Hits Total"] = df_hits_sorted["_hits_clean"].cumsum()
     if total_hits > 0:
         df_hits_sorted["Percentage Hits"] = (df_hits_sorted["Cumulative Hits Total"] / total_hits) * 100.0
@@ -507,28 +557,50 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         df_hits_sorted["Percentage Hits"] = 0.0
     df_hits_sorted["Hits Classification"] = df_hits_sorted["Percentage Hits"].apply(assign_class)
 
-    # Map Hits metrics back to df_sorted order
-    df_sorted["Cumulative Hits Total"] = df_hits_sorted["Cumulative Hits Total"].loc[df_sorted.index]
-    df_sorted["Percentage Hits"] = df_hits_sorted["Percentage Hits"].loc[df_sorted.index]
-    df_sorted["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_sorted.index]
+    # Dedicated Hits calculation breakdown table
+    hits_calc_cols = [c for c in [name_col, hits_col, "Cumulative Hits Total", "Percentage Hits", "Hits Classification"] if c in df_hits_sorted.columns]
+    hits_calc_df = df_hits_sorted[hits_calc_cols].copy()
 
-    # Aliases for hits
-    df_sorted["Cumulative Hits"] = df_sorted["Cumulative Hits Total"]
-    df_sorted["Hits Percentage"] = df_sorted["Percentage Hits"]
+    # =========================================================================
+    # 3. FINAL TABLE (Maintains original uploaded order - no specific sorting!)
+    # "Final table does not need the calculations either, only the classifications"
+    # =========================================================================
+    df_final = df_result.copy()
+    df_final["Sales ($) Classification"] = df_sales_sorted["Sales ($) Classification"].loc[df_final.index]
+    df_final["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_final.index]
+    df_final["Multicriteria Classification"] = df_final["Sales ($) Classification"] + "-" + df_final["Hits Classification"]
+    df_final["Managerial Insight"] = df_final.apply(
+        lambda r: get_multicriteria_managerial_insight(r["Sales ($) Classification"], r["Hits Classification"]),
+        axis=1
+    )
+    # Drop internal clean columns
+    df_final = df_final.drop(columns=["_sales_clean", "_hits_clean"], errors="ignore")
 
-    # 6. Multicriteria composite classification
-    df_sorted["Multicriteria Class"] = df_sorted["Sales ($) Classification"] + "-" + df_sorted["Hits Classification"]
+    # =========================================================================
+    # 4. COMBINED / SORTED DATAFRAME FOR TEST SUITE BACKWARD COMPATIBILITY
+    # =========================================================================
+    df_combined = df_sales_sorted.copy()
+    df_combined["Cumulative Total"] = df_combined["Cumulative Sales ($) Total"]
+    df_combined["Percentage"] = df_combined["Percentage Sales ($)"]
+    df_combined["Classification"] = df_combined["Sales ($) Classification"]
+    df_combined["Cumulative Hits Total"] = df_hits_sorted["Cumulative Hits Total"].loc[df_combined.index]
+    df_combined["Percentage Hits"] = df_hits_sorted["Percentage Hits"].loc[df_combined.index]
+    df_combined["Cumulative Hits"] = df_combined["Cumulative Hits Total"]
+    df_combined["Hits Percentage"] = df_combined["Percentage Hits"]
+    df_combined["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_combined.index]
+    df_combined["Multicriteria Class"] = df_combined["Sales ($) Classification"] + "-" + df_combined["Hits Classification"]
+    df_combined["Multicriteria Classification"] = df_combined["Multicriteria Class"]
+    df_combined["Managerial Insight"] = df_combined.apply(
+        lambda r: get_multicriteria_managerial_insight(r["Sales ($) Classification"], r["Hits Classification"]),
+        axis=1
+    )
+    df_combined = df_combined.drop(columns=["_sales_clean", "_hits_clean"], errors="ignore")
 
-    # 7. Sales ($) Class summary distribution table
+    # =========================================================================
+    # 5. CLASS SUMMARY DISTRIBUTION TABLES
+    # =========================================================================
     classes = ["A", "B", "C", "D"]
-    total_items = len(df_sorted)
-    sales_summary_rows = []
-    sales_policy_map = {
-        "A": "Strict inventory control, continuous review, tight replenishment, high target service level",
-        "B": "Moderate control, periodic review, standard safety stock buffer, automated reordering",
-        "C": "Simplified control, larger order quantities, visual review / periodic batching",
-        "D": "Candidate for rationalization/liquidation, make-to-order, minimal buffer stock"
-    }
+    total_items = len(df_result)
     criteria_map = {
         "A": "0% < x ≤ 60%",
         "B": "60% < x ≤ 80%",
@@ -536,9 +608,17 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         "D": "90% < x"
     }
 
+    # Sales ($) summary table
+    sales_policy_map = {
+        "A": "Strict inventory control, continuous review, tight replenishment, high target service level",
+        "B": "Moderate control, periodic review, standard safety stock buffer, automated reordering",
+        "C": "Simplified control, larger order quantities, visual review / periodic batching",
+        "D": "Candidate for rationalization/liquidation, make-to-order, minimal buffer stock"
+    }
+    sales_summary_rows = []
     cum_sales_pct_running = 0.0
     for cls in classes:
-        subset = df_sorted[df_sorted["Sales ($) Classification"] == cls]
+        subset = df_sales_sorted[df_sales_sorted["Sales ($) Classification"] == cls]
         cnt = len(subset)
         pct_items = (cnt / total_items * 100.0) if total_items > 0 else 0.0
         cls_sales = float(subset["_sales_clean"].sum())
@@ -557,18 +637,17 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         })
     sales_summary_df = pd.DataFrame(sales_summary_rows)
 
-    # 8. Hits Class summary distribution table
-    hits_summary_rows = []
+    # Hits summary table
     hits_policy_map = {
         "A": "Fast Movers: Prime warehouse picking slotting (golden zone), frequent replenishment",
         "B": "Medium Movers: Standard shelf/rack slotting, periodic picking replenishment",
         "C": "Slow Movers: Upper or lower rack storage, batch picking consolidation",
         "D": "Very Slow Movers / Dead Stock: Reserve or remote storage, review for obsolete stock purge"
     }
-
+    hits_summary_rows = []
     cum_hits_pct_running = 0.0
     for cls in classes:
-        subset = df_sorted[df_sorted["Hits Classification"] == cls]
+        subset = df_hits_sorted[df_hits_sorted["Hits Classification"] == cls]
         cnt = len(subset)
         pct_items = (cnt / total_items * 100.0) if total_items > 0 else 0.0
         cls_hits = float(subset["_hits_clean"].sum())
@@ -587,10 +666,12 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         })
     hits_summary_df = pd.DataFrame(hits_summary_rows)
 
-    # 9. 4x4 Multicriteria Cross-Tabulation Matrix
+    # =========================================================================
+    # 6. 4x4 MULTICRITERIA CROSS-TABULATION MATRIX
+    # =========================================================================
     base_matrix = pd.crosstab(
-        df_sorted["Sales ($) Classification"],
-        df_sorted["Hits Classification"]
+        df_final["Sales ($) Classification"],
+        df_final["Hits Classification"]
     )
     for cls in ["A", "B", "C", "D"]:
         if cls not in base_matrix.index:
@@ -599,23 +680,21 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
             base_matrix[cls] = 0
     crosstab_matrix = base_matrix.reindex(index=["A", "B", "C", "D"], columns=["A", "B", "C", "D"]).fillna(0).astype(int)
 
-    # Matrix with row/col totals
     crosstab_with_totals = crosstab_matrix.copy()
     crosstab_with_totals["Total"] = crosstab_with_totals.sum(axis=1)
     totals_row = crosstab_with_totals.sum(axis=0)
     totals_row.name = "Total"
     crosstab_with_totals = pd.concat([crosstab_with_totals, pd.DataFrame([totals_row])])
 
-    # Clean internal temporary columns for display
-    df_display = df_sorted.drop(columns=["_sales_clean", "_hits_clean"])
-
     return {
         "is_valid": True,
-        "dataframe": df_display,
-        "raw_sorted_df": df_sorted,
-        "num_rows": int(df.shape[0]),
-        "num_cols": int(df_display.shape[1]),
-        "column_names": list(df_display.columns),
+        "dataframe": df_combined,          # Full dataset for test suite
+        "final_table": df_final,            # Clean final table in original order
+        "sales_calc_df": sales_calc_df,    # Calculation table sorted by Sales ($)
+        "hits_calc_df": hits_calc_df,      # Calculation table sorted by Hits
+        "num_rows": int(df_final.shape[0]),
+        "num_cols": int(df_final.shape[1]),
+        "column_names": list(df_final.columns),
         "total_sales": total_sales,
         "total_hits": total_hits,
         "total_items": total_items,
@@ -768,7 +847,7 @@ def try_run_streamlit(agent: InventoryAgent):
     # DATA PROCESSING & ANALYSIS SECTION (When CSV is uploaded)
     if uploaded_file is not None:
         st.markdown("---")
-        st.header("📊 Inventory Data Analysis & Classification")
+        st.header("📊 Inventory Data Analysis")
 
         try:
             import pandas as pd
@@ -777,170 +856,176 @@ def try_run_streamlit(agent: InventoryAgent):
             return True
 
         try:
-            # 1. Read CSV file into a pandas dataframe
-            df_uploaded = pd.read_csv(uploaded_file)
+            # Read CSV file (supports UTF-8 and UTF-8-sig for BOM)
+            try:
+                df_uploaded = pd.read_csv(uploaded_file, encoding="utf-8-sig")
+            except Exception:
+                uploaded_file.seek(0)
+                df_uploaded = pd.read_csv(uploaded_file)
         except Exception as e:
             st.error(f"❌ Error reading CSV file: {e}")
             return True
 
-        # Check schemas: Classification (Sales + Hits) vs Product Valuation (Product, Category, Units, Unit Cost)
-        is_classification = any("sale" in c.lower() for c in df_uploaded.columns) and any("hit" in c.lower() for c in df_uploaded.columns)
-        is_product_analysis = all(c in df_uploaded.columns for c in ["Product", "Category", "Units", "Unit Cost"])
+        # Execute Multicriteria Classification for Sales ($) and Hits
+        class_res = classify_inventory_dataframe(df_uploaded)
 
-        def render_product_analysis_view(df: Any):
-            analysis = analyze_inventory_dataframe(df)
-            if not analysis["is_valid"]:
-                st.error(
-                    f"❌ Invalid Product Analysis CSV: Missing required column(s): **{', '.join(analysis['missing_columns'])}**.\n\n"
-                    f"Required columns are: **{', '.join(analysis['required_columns'])}**."
-                )
-                return
+        # Mandatory Section Heading strictly matching user specification
+        st.subheader("📈 Inventory Analysis Results")
 
-            st.subheader("📋 Dataset Overview")
-            meta_col1, meta_col2, meta_col3 = st.columns(3)
-            meta_col1.metric("Number of Rows", f"{analysis['num_rows']:,}")
-            meta_col2.metric("Number of Columns", f"{analysis['num_cols']:,}")
-            meta_col3.metric("Column Count", f"{len(analysis['column_names']):,}")
-            st.caption(f"**Column Names:** {', '.join(analysis['column_names'])}")
+        if not class_res["is_valid"]:
+            st.error(f"❌ Classification Error: {class_res['error_message']}")
+            st.info(f"Columns found in uploaded CSV: `{', '.join(list(df_uploaded.columns))}`")
+        else:
+            # 1. Executive KPIs Row 1: Catalog Volume & Value
+            kpi_row1 = st.columns(4)
+            kpi_row1[0].metric("Total SKUs / Items", f"{class_res['total_items']:,}")
+            kpi_row1[1].metric("Total Annual Sales", f"${class_res['total_sales']:,.2f}")
+            kpi_row1[2].metric("Total Order Hits", f"{class_res['total_hits']:,.0f}")
 
-            with st.expander("🔍 View Raw Uploaded DataFrame", expanded=False):
-                st.dataframe(df, use_container_width=True)
+            # Check for inventory value or average sales
+            inv_val = class_res["final_table"]["Inventory Value"].sum() if "Inventory Value" in class_res["final_table"].columns else None
+            if inv_val is not None and inv_val > 0:
+                kpi_row1[3].metric("Total Inventory Value", f"${inv_val:,.2f}")
+            else:
+                avg_sale = class_res['total_sales'] / class_res['total_items'] if class_res['total_items'] > 0 else 0.0
+                kpi_row1[3].metric("Average Sales / SKU", f"${avg_sale:,.2f}")
 
-            st.subheader("📈 Inventory Analysis Results")
-            kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-            kpi_col1.metric("Total Units", f"{analysis['total_units']:,.0f}")
-            kpi_col2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
-            kpi_col3.metric(
-                "Product with Highest Units",
-                analysis["product_highest_units"],
-                help=f"{analysis['highest_units_count']:,.0f} units"
-            )
-            kpi_col4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+            # 2. Executive KPIs Row 2: Classification Highlights for BOTH Sales ($) and Hits
+            kpi_row2 = st.columns(4)
+            sales_summary = class_res["sales_summary"]
+            hits_summary = class_res["hits_summary"]
 
-            cat_col, val_col = st.columns([1, 2])
-            with cat_col:
-                st.markdown("#### 🏷️ Total Units by Category")
-                st.dataframe(
-                    analysis["category_summary"].style.format({"Total Units": "{:,.0f}"}),
-                    use_container_width=True,
-                    hide_index=True
-                )
+            s_a = sales_summary[sales_summary["Class"] == "A"]
+            s_a_cnt = int(s_a["Item Count"].values[0]) if len(s_a) > 0 else 0
+            s_a_pct = float(s_a["% of Sales"].values[0]) if len(s_a) > 0 else 0.0
+            kpi_row2[0].metric("Sales Class A", f"{s_a_cnt} items", f"{s_a_pct:.1f}% of Sales")
 
-            with val_col:
-                st.markdown("#### 📦 Product Inventory Value Details")
-                st.caption("Includes calculated column: `Inventory Value = Units × Unit Cost`")
+            s_b = sales_summary[sales_summary["Class"] == "B"]
+            s_b_cnt = int(s_b["Item Count"].values[0]) if len(s_b) > 0 else 0
+            s_b_pct = float(s_b["% of Sales"].values[0]) if len(s_b) > 0 else 0.0
+            kpi_row2[1].metric("Sales Class B", f"{s_b_cnt} items", f"{s_b_pct:.1f}% of Sales")
 
-            df_enhanced = analysis["dataframe"]
-            formatted_df = df_enhanced.copy()
-            formatted_df["Unit Cost"] = formatted_df["Unit Cost"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "")
-            formatted_df["Inventory Value"] = formatted_df["Inventory Value"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "")
-            formatted_df["Units"] = formatted_df["Units"].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
-            st.dataframe(formatted_df, use_container_width=True)
+            h_a = hits_summary[hits_summary["Class"] == "A"]
+            h_a_cnt = int(h_a["Item Count"].values[0]) if len(h_a) > 0 else 0
+            h_a_pct = float(h_a["% of Hits"].values[0]) if len(h_a) > 0 else 0.0
+            kpi_row2[2].metric("Hits Class A", f"{h_a_cnt} items", f"{h_a_pct:.1f}% of Hits")
 
-        def render_classification_view(df: Any):
-            res = classify_inventory_dataframe(df)
-            if not res["is_valid"]:
-                st.error(f"❌ Classification Error: {res['error_message']}")
-                st.info(f"Columns found in uploaded CSV: `{', '.join(list(df.columns))}`")
-                return
+            h_b = hits_summary[hits_summary["Class"] == "B"]
+            h_b_cnt = int(h_b["Item Count"].values[0]) if len(h_b) > 0 else 0
+            h_b_pct = float(h_b["% of Hits"].values[0]) if len(h_b) > 0 else 0.0
+            kpi_row2[3].metric("Hits Class B", f"{h_b_cnt} items", f"{h_b_pct:.1f}% of Hits")
 
-            st.subheader("📋 Multicriteria Classification Overview")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total SKUs / Items", f"{res['total_items']:,}")
-            c2.metric("Total Annual Sales", f"${res['total_sales']:,.2f}")
-            c3.metric("Total Pick Hits", f"{res['total_hits']:,.0f}")
-            class_a_sales = res["class_summary"].loc[res["class_summary"]["Class"] == "A", "Total Sales ($)"].values[0] if len(res["class_summary"]) > 0 else 0.0
-            class_a_pct = (class_a_sales / res["total_sales"] * 100) if res["total_sales"] > 0 else 0.0
-            c4.metric("Class A Revenue Share", f"{class_a_pct:.1f}%", f"${class_a_sales:,.2f}")
+            # 3. Two Side-by-Side Classification Summary Distribution Tables
+            col_s, col_h = st.columns(2)
+            with col_s:
+                st.markdown("#### 🏷️ Sales ($) Classification Summary (A, B, C, D)")
+                st.caption("Criteria: **A** (0% < x ≤ 60%) | **B** (60% < x ≤ 80%) | **C** (80% < x ≤ 90%) | **D** (90% < x)")
+                sales_disp = sales_summary.copy()
+                sales_disp["Total Sales ($)"] = sales_disp["Total Sales ($)"].apply(safe_format_currency)
+                sales_disp["% of Items"] = sales_disp["% of Items"].apply(safe_format_pct)
+                sales_disp["% of Sales"] = sales_disp["% of Sales"].apply(safe_format_pct)
+                sales_disp["Cumulative Sales %"] = sales_disp["Cumulative Sales %"].apply(safe_format_pct)
+                st.dataframe(sales_disp, use_container_width=True, hide_index=True)
 
-            with st.expander("🔍 View Raw Uploaded DataFrame", expanded=False):
-                st.dataframe(df, use_container_width=True)
+            with col_h:
+                st.markdown("#### 🎯 Hits Classification Summary (A, B, C, D)")
+                st.caption("Criteria: **A** (0% < x ≤ 60%) | **B** (60% < x ≤ 80%) | **C** (80% < x ≤ 90%) | **D** (90% < x)")
+                hits_disp = hits_summary.copy()
+                hits_disp["Total Hits"] = hits_disp["Total Hits"].apply(safe_format_hits)
+                hits_disp["% of Items"] = hits_disp["% of Items"].apply(safe_format_pct)
+                hits_disp["% of Hits"] = hits_disp["% of Hits"].apply(safe_format_pct)
+                hits_disp["Cumulative Hits %"] = hits_disp["Cumulative Hits %"].apply(safe_format_pct)
+                st.dataframe(hits_disp, use_container_width=True, hide_index=True)
 
-            # 4-Class summary distribution table
-            st.markdown("### 🏆 Inventory Classification Summary (A, B, C, D)")
-            st.markdown(
-                "**Classification Criteria:** "
-                "• **Class A**: 0% < x ≤ 60% | "
-                "• **Class B**: 60% < x ≤ 80% | "
-                "• **Class C**: 80% < x ≤ 90% | "
-                "• **Class D**: 90% < x"
-            )
-
-            summary_display = res["class_summary"].copy()
-            summary_display["Total Sales ($)"] = summary_display["Total Sales ($)"].apply(lambda x: f"${x:,.2f}")
-            summary_display["% of Items"] = summary_display["% of Items"].apply(lambda x: f"{x:.1f}%")
-            summary_display["% of Sales"] = summary_display["% of Sales"].apply(lambda x: f"{x:.1f}%")
-            summary_display["Total Hits"] = summary_display["Total Hits"].apply(lambda x: f"{x:,.0f}")
-            summary_display["% of Hits"] = summary_display["% of Hits"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(summary_display, use_container_width=True, hide_index=True)
-
-            # Multicriteria 2D Matrix (Sales Class vs Hits Class)
-            st.markdown("### 🔲 Multicriteria Matrix: Sales ($) vs. Hits (Velocity)")
+            # 4. Multicriteria Cross-Tabulation Matrix & Policy Guide
+            st.markdown("### 🔲 Multicriteria Matrix: Sales ($) Class × Hits Class")
             m_col1, m_col2 = st.columns([1, 1])
             with m_col1:
-                st.markdown("**SKU Count by Class Combination (Sales Class Rows × Hits Class Columns)**")
-                st.dataframe(res["crosstab_with_totals"], use_container_width=True)
+                st.markdown("**SKU Distribution (Sales ($) Class Rows × Hits Class Columns)**")
+                st.dataframe(class_res["crosstab_with_totals"], use_container_width=True)
 
             with m_col2:
-                with st.expander("📖 Managerial Policy Guide for Matrix Quadrants", expanded=True):
+                with st.expander("📖 Managerial Policy Guide for Both Criteria (Quadrant Breakdown)", expanded=True):
                     st.markdown(
-                        "- **A-A (High Sales, High Hits):** Fast-moving revenue drivers. Strict daily monitoring, continuous replenishment, tight supplier integration.\n"
-                        "- **A-D (High Sales, Low Hits):** High dollar, slow moving / lumpy demand. Strict managerial review, make-to-order, minimal safety stock.\n"
-                        "- **D-A (Low Sales, High Hits):** Cheap fast movers (fasteners, supplies). Bulk ordering, two-bin visual Kanban, high service levels.\n"
-                        "- **D-D (Low Sales, Low Hits):** Dead stock or slow moving. Review for SKU rationalization, liquidation, or zero-inventory on-demand sourcing."
+                        "- **A-A (High Sales, High Hits):** Top-Priority Fast Movers. Daily continuous review, automated replenishment, tight supplier integration, 98-99% service level, golden-zone warehouse slotting.\n"
+                        "- **A-D (High Sales, Low Hits):** High Dollar, Lumpy Demand. Capital-intensive slow mover. Strictly make-to-order (MTO), strict purchasing approval, zero buffer stock to avoid tied-up working capital.\n"
+                        "- **D-A (Low Sales, High Hits):** Cheap Fast Movers (Fasteners/Consumables). Inexpensive parts with frequent picks. Bulk ordering, two-bin visual Kanban replenishment, high service level (minimal capital cost).\n"
+                        "- **D-D (Low Sales, Low Hits):** Dead Stock / Obsolete Candidates. Minimal revenue and near-zero velocity. Candidate for catalog rationalization, clearance liquidation, or order-to-order sourcing."
                     )
 
-            # Full Classified Table
-            st.markdown("### 📑 Full Classified Inventory Table")
-            st.caption("Sorted descending by Sales ($). Displays Cumulative Total, Cumulative Percentage, Sales Classification, Hits Classification, and Multicriteria Class.")
+            # 5. Final Classified Inventory Table (Maintains original uploaded order - no specific sorting!)
+            st.markdown("### 📑 Final Classified Inventory Table")
+            st.caption("Maintains original uploaded catalog order. Displays Sales ($) Classification, Hits Classification, Multicriteria Classification, and Managerial Insights advising on both criteria.")
 
-            df_out = res["dataframe"].copy()
-            sales_c = res["sales_col"]
-            hits_c = res["hits_col"]
+            final_table = class_res["final_table"].copy()
+            sales_c = class_res["sales_col"]
+            hits_c = class_res["hits_col"]
 
-            df_out_display = df_out.copy()
-            df_out_display[sales_c] = df_out_display[sales_c].apply(
-                lambda x: f"${float(str(x).replace('$', '').replace(',', '')):,.2f}" if pd.notnull(x) else ""
-            )
-            df_out_display["Cumulative Total"] = df_out_display["Cumulative Total"].apply(
-                lambda x: f"${x:,.2f}" if pd.notnull(x) else ""
-            )
-            df_out_display["Percentage"] = df_out_display["Percentage"].apply(
-                lambda x: f"{x:.1f}%" if pd.notnull(x) else ""
-            )
-            df_out_display[hits_c] = df_out_display[hits_c].apply(
-                lambda x: f"{float(str(x).replace(',', '')):,.0f}" if pd.notnull(x) else ""
-            )
+            final_display = final_table.copy()
+            if sales_c in final_display.columns:
+                final_display[sales_c] = final_display[sales_c].apply(safe_format_currency)
+            if hits_c in final_display.columns:
+                final_display[hits_c] = final_display[hits_c].apply(safe_format_hits)
+            if "Unit Cost" in final_display.columns:
+                final_display["Unit Cost"] = final_display["Unit Cost"].apply(safe_format_currency)
+            if "Inventory Value" in final_display.columns:
+                final_display["Inventory Value"] = final_display["Inventory Value"].apply(safe_format_currency)
 
-            st.dataframe(df_out_display, use_container_width=True)
+            st.dataframe(final_display, use_container_width=True)
 
-            # Download classified dataset
-            csv_data = df_out.to_csv(index=False).encode("utf-8")
+            csv_final = final_table.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="📥 Download Classified Inventory CSV",
-                data=csv_data,
-                file_name="classified_inventory.csv",
+                label="📥 Download Final Classified Inventory CSV",
+                data=csv_final,
+                file_name="final_classified_inventory.csv",
                 mime="text/csv",
-                help="Export the sorted inventory with Cumulative Total, Percentage, and Classifications"
+                help="Export the catalog in original order with Sales ($), Hits, and Multicriteria Classifications"
             )
 
-        if is_classification and is_product_analysis:
-            tab_class, tab_prod = st.tabs(["🏷️ Multicriteria Classification (A/B/C/D)", "📦 Product Value Analysis"])
-            with tab_class:
-                render_classification_view(df_uploaded)
-            with tab_prod:
-                render_product_analysis_view(df_uploaded)
-        elif is_classification:
-            render_classification_view(df_uploaded)
-        elif is_product_analysis:
-            render_product_analysis_view(df_uploaded)
-        else:
-            st.error(
-                "❌ Invalid CSV File: The uploaded dataset does not match either supported schema:\n\n"
-                "1. **Inventory Classification:** Requires `Item Name`, `Sales ($)`, and `Hits` (optional: `Item Number`, `UoM`).\n"
-                "2. **Product Valuation:** Requires `Product`, `Category`, `Units`, and `Unit Cost`."
-            )
-            st.info(f"Columns found in uploaded CSV: `{', '.join(list(df_uploaded.columns))}`")
+            # 6. Separate Calculation Breakdown Tables (Sorted from Largest to Smallest)
+            st.markdown("### 🧮 Pareto Calculation Tables (Sorted Largest to Smallest)")
+            st.caption("Sorting from largest to smallest is performed strictly for the cumulative calculations for Sales ($) and Hits.")
+
+            calc_tab1, calc_tab2 = st.tabs([
+                "🏷️ Sales ($) Pareto Calculations (Sorted by Sales)",
+                "🎯 Hits Pareto Calculations (Sorted by Hits)"
+            ])
+
+            with calc_tab1:
+                sales_calc_display = class_res["sales_calc_df"].copy()
+                if sales_c in sales_calc_display.columns:
+                    sales_calc_display[sales_c] = sales_calc_display[sales_c].apply(safe_format_currency)
+                if "Cumulative Sales ($) Total" in sales_calc_display.columns:
+                    sales_calc_display["Cumulative Sales ($) Total"] = sales_calc_display["Cumulative Sales ($) Total"].apply(safe_format_currency)
+                if "Percentage Sales ($)" in sales_calc_display.columns:
+                    sales_calc_display["Percentage Sales ($)"] = sales_calc_display["Percentage Sales ($)"].apply(safe_format_pct)
+                st.dataframe(sales_calc_display, use_container_width=True, hide_index=True)
+
+            with calc_tab2:
+                hits_calc_display = class_res["hits_calc_df"].copy()
+                if hits_c in hits_calc_display.columns:
+                    hits_calc_display[hits_c] = hits_calc_display[hits_c].apply(safe_format_hits)
+                if "Cumulative Hits Total" in hits_calc_display.columns:
+                    hits_calc_display["Cumulative Hits Total"] = hits_calc_display["Cumulative Hits Total"].apply(safe_format_hits)
+                if "Percentage Hits" in hits_calc_display.columns:
+                    hits_calc_display["Percentage Hits"] = hits_calc_display["Percentage Hits"].apply(safe_format_pct)
+                st.dataframe(hits_calc_display, use_container_width=True, hide_index=True)
+
+            # 7. Category Breakdown (if Category column exists in CSV)
+            if "Category" in df_uploaded.columns and ("Units" in df_uploaded.columns or sales_c in df_uploaded.columns):
+                cat_val_col = "Units" if "Units" in df_uploaded.columns else sales_c
+                cat_summary = (
+                    df_uploaded.groupby("Category")[cat_val_col]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={cat_val_col: f"Total {cat_val_col}"})
+                )
+                st.markdown("#### 🏷️ Total by Category")
+                st.dataframe(cat_summary, use_container_width=True, hide_index=True)
+
+            # 8. Raw Dataset Expander
+            with st.expander("🔍 View Raw Uploaded DataFrame", expanded=False):
+                st.dataframe(df_uploaded, use_container_width=True)
 
     return True
 
