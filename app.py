@@ -298,54 +298,93 @@ def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
 
 def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
     """
-    Validate and classify inventory items using multicriteria classification (Sales and Hits).
-    Required columns: Item Name, Sales ($), Hits.
-    Optional columns: Item Number, UoM.
+    Validate and classify inventory items using multicriteria classification (Sales ($) and Hits).
+    Supports A, B, C, D classifications for both Sales ($) and Hits.
+
+    Column Titles for Results:
+    - Cumulative Sales ($) Total
+    - Percentage Sales ($)
+    - Sales ($) Classification
+    - Cumulative Hits Total
+    - Percentage Hits
+    - Hits Classification
+    - Multicriteria Class
+
+    Classification Criteria:
+    - A items: 0% < x <= 60%
+    - B items: 60% < x <= 80%
+    - C items: 80% < x <= 90%
+    - D items: 90% < x
 
     Calculations performed via pandas:
-    1. Identifies and validates required columns: Item Name, Sales ($), Hits.
-    2. Cleans currency formatting, dollar signs, and commas.
+    1. Identifies and validates Sales ($) and Hits columns flexibly.
+       - Detects explicit 'Sales ($)', 'Sales', 'Annual Sales', 'Revenue ($)'.
+       - If missing but 'Units' and 'Unit Cost' exist, computes Sales ($) = Units * Unit Cost.
+       - Detects explicit 'Hits', 'Hit', 'Picks', 'Frequency', 'Transactions', 'Orders'.
+       - If missing but 'Units' exists, uses 'Units' as Hits proxy.
+       - Detects Item identifier: 'Item Name', 'Product', 'Item Number', 'Item', 'Description', 'SKU', or first column.
+    2. Cleans currency formatting, dollar signs, commas, and whitespace.
     3. Sorts items from largest to smallest in terms of Sales ($).
-    4. Cumulative Sales ($): starting with largest Sales ($) equaling itself,
+    4. Cumulative Sales ($) Total: starting with largest Sales ($) equaling itself,
        adding each next largest Sales ($) down the list.
-    5. Cumulative percentage: cumulative value divided by total cumulative value.
-    6. Classifies items based on criteria:
-       - A items: 0% < x <= 60%
-       - B items: 60% < x <= 80%
-       - C items: 80% < x <= 90%
-       - D items: 90% < x
-    7. Performs Hits classification: items sorted by Hits descending, cumulative % calculated,
-       and classified into A (<=60%), B (60-80%), C (80-90%), D (>90%).
+    5. Percentage Sales ($): (Cumulative Sales ($) Total / Total Sales) * 100.
+    6. Classifies Sales ($) items:
+       - A: 0% < x <= 60%
+       - B: 60% < x <= 80%
+       - C: 80% < x <= 90%
+       - D: 90% < x
+    7. Sorts items from largest to smallest in terms of Hits before calculating:
+       Cumulative Hits Total: running sum of Hits.
+       Percentage Hits: (Cumulative Hits Total / Total Hits) * 100.
+       Classifies Hits items:
+       - A: 0% < x <= 60%
+       - B: 60% < x <= 80%
+       - C: 80% < x <= 90%
+       - D: 90% < x
     8. Forms Multicriteria Class (e.g. A-A, A-B, B-C, D-D).
     9. Generates 4x4 cross-tabulation matrix (pd.crosstab) for multicriteria inventory control.
-    10. Generates Class summary distribution table (Item count, % items, total sales, % sales, total hits, % hits).
+    10. Generates Class summary distribution tables for both Sales ($) and Hits.
     """
     # Identify columns flexibly
     sales_col = None
-    for c in df.columns:
-        if c.strip().lower() in ["sales ($)", "sales", "sales ($)", "sales (usd)", "annual sales", "sales_$"]:
+    for c in getattr(df, "columns", []):
+        c_clean = str(c).strip().lower()
+        if c_clean in ["sales ($)", "sales", "sales($)", "sales (usd)", "annual sales", "sales_$", "revenue ($)", "revenue"]:
+            sales_col = c
+            break
+        elif "sale" in c_clean or "revenue" in c_clean:
             sales_col = c
             break
 
     hits_col = None
-    for c in df.columns:
-        if c.strip().lower() in ["hits", "hit", "picks", "order frequency", "transactions", "frequency"]:
+    for c in getattr(df, "columns", []):
+        c_clean = str(c).strip().lower()
+        if c_clean in ["hits", "hit", "picks", "pick hits", "order frequency", "transactions", "frequency", "orders"]:
+            hits_col = c
+            break
+        elif "hit" in c_clean or "pick" in c_clean:
             hits_col = c
             break
 
-    name_col = None
-    for c in df.columns:
-        if c.strip().lower() in ["item name", "item_name", "item", "product", "product name", "description"]:
-            name_col = c
-            break
+    # Fallback: if Units and Unit Cost exist, Sales ($) can be derived
+    if not sales_col:
+        has_units = any("unit" in str(c).lower() and "cost" not in str(c).lower() and "price" not in str(c).lower() for c in getattr(df, "columns", []))
+        has_cost = any("cost" in str(c).lower() or "price" in str(c).lower() for c in getattr(df, "columns", []))
+        if has_units and has_cost:
+            sales_col = "Sales ($)"
 
+    # Fallback: if Units exists, Hits can be derived from Units
+    if not hits_col:
+        has_units = any("unit" in str(c).lower() and "cost" not in str(c).lower() and "price" not in str(c).lower() for c in getattr(df, "columns", []))
+        if has_units:
+            hits_col = "Hits"
+
+    # Validate missing columns before attempting dataframe operations
     missing_cols = []
     if not sales_col:
         missing_cols.append("Sales ($)")
     if not hits_col:
         missing_cols.append("Hits")
-    if not name_col:
-        missing_cols.append("Item Name")
 
     if missing_cols:
         return {
@@ -365,7 +404,49 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
             "error_message": "pandas library is required for data calculations.",
         }
 
+    if not hasattr(df, "copy"):
+        return {
+            "is_valid": False,
+            "missing_columns": [],
+            "required_columns": ["Item Name", "Sales ($)", "Hits"],
+            "error_message": "Input must be a valid pandas DataFrame.",
+        }
+
     df_result = df.copy()
+
+    # Identify item identifier column
+    name_col = None
+    for c in df_result.columns:
+        c_clean = str(c).strip().lower()
+        if c_clean in ["item name", "item_name", "product", "product name", "item", "description", "item description"]:
+            name_col = c
+            break
+    if not name_col:
+        for c in df_result.columns:
+            c_clean = str(c).strip().lower()
+            if any(k in c_clean for k in ["number", "num", "sku", "id", "part", "code"]):
+                name_col = c
+                break
+    if not name_col and len(df_result.columns) > 0:
+        name_col = df_result.columns[0]
+
+    # Compute derived Sales ($) if needed
+    if sales_col == "Sales ($)" and "Sales ($)" not in df_result.columns:
+        units_c = next((c for c in df_result.columns if "unit" in str(c).lower() and "cost" not in str(c).lower() and "price" not in str(c).lower()), None)
+        cost_c = next((c for c in df_result.columns if "cost" in str(c).lower() or "price" in str(c).lower()), None)
+        if units_c and cost_c:
+            def _clean_n(s):
+                if s.dtype == object:
+                    clean = s.astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.strip()
+                    return pd.to_numeric(clean, errors="coerce").fillna(0.0)
+                return pd.to_numeric(s, errors="coerce").fillna(0.0)
+            df_result["Sales ($)"] = _clean_n(df_result[units_c]) * _clean_n(df_result[cost_c])
+
+    # Compute derived Hits if needed
+    if hits_col == "Hits" and "Hits" not in df_result.columns:
+        units_c = next((c for c in df_result.columns if "unit" in str(c).lower() and "cost" not in str(c).lower() and "price" not in str(c).lower()), None)
+        if units_c:
+            df_result["Hits"] = df_result[units_c]
 
     # Clean numeric values
     def clean_series(s):
@@ -384,15 +465,19 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         ascending=[False, False]
     ).reset_index(drop=True)
 
-    # 2. Cumulative Sales ($) starting with largest Sales ($) equaling itself
-    df_sorted["Cumulative Total"] = df_sorted["_sales_clean"].cumsum()
+    # 2. Cumulative Sales ($) Total: starting with largest Sales ($) equaling itself
+    df_sorted["Cumulative Sales ($) Total"] = df_sorted["_sales_clean"].cumsum()
 
-    # 3. Calculate cumulative percentage for each item
+    # 3. Percentage Sales ($): cumulative value divided by total sales value
     total_sales = float(df_sorted["_sales_clean"].sum())
     if total_sales > 0:
-        df_sorted["Percentage"] = (df_sorted["Cumulative Total"] / total_sales) * 100.0
+        df_sorted["Percentage Sales ($)"] = (df_sorted["Cumulative Sales ($) Total"] / total_sales) * 100.0
     else:
-        df_sorted["Percentage"] = 0.0
+        df_sorted["Percentage Sales ($)"] = 0.0
+
+    # Aliases for backward compatibility
+    df_sorted["Cumulative Total"] = df_sorted["Cumulative Sales ($) Total"]
+    df_sorted["Percentage"] = df_sorted["Percentage Sales ($)"]
 
     # 4. Classify based on criteria:
     # - A items 0% < x <= 60%
@@ -409,57 +494,102 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         else:
             return "D"
 
-    df_sorted["Classification"] = df_sorted["Percentage"].apply(assign_class)
+    df_sorted["Sales ($) Classification"] = df_sorted["Percentage Sales ($)"].apply(assign_class)
+    df_sorted["Classification"] = df_sorted["Sales ($) Classification"]
 
-    # 5. Hits classification (Pareto pick-frequency velocity)
+    # 5. Hits classification: Sort Hits values from largest to smallest before calculating
     total_hits = float(df_sorted["_hits_clean"].sum())
-    df_hits_sorted = df_sorted.sort_values(by="_hits_clean", ascending=False).copy()
-    df_hits_sorted["_cum_hits"] = df_hits_sorted["_hits_clean"].cumsum()
+    df_hits_sorted = df_sorted.sort_values(by=["_hits_clean", "_sales_clean"], ascending=[False, False]).copy()
+    df_hits_sorted["Cumulative Hits Total"] = df_hits_sorted["_hits_clean"].cumsum()
     if total_hits > 0:
-        df_hits_sorted["_hits_pct"] = (df_hits_sorted["_cum_hits"] / total_hits) * 100.0
+        df_hits_sorted["Percentage Hits"] = (df_hits_sorted["Cumulative Hits Total"] / total_hits) * 100.0
     else:
-        df_hits_sorted["_hits_pct"] = 0.0
-    df_hits_sorted["Hits Classification"] = df_hits_sorted["_hits_pct"].apply(assign_class)
+        df_hits_sorted["Percentage Hits"] = 0.0
+    df_hits_sorted["Hits Classification"] = df_hits_sorted["Percentage Hits"].apply(assign_class)
+
+    # Map Hits metrics back to df_sorted order
+    df_sorted["Cumulative Hits Total"] = df_hits_sorted["Cumulative Hits Total"].loc[df_sorted.index]
+    df_sorted["Percentage Hits"] = df_hits_sorted["Percentage Hits"].loc[df_sorted.index]
     df_sorted["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_sorted.index]
 
-    # 6. Multicriteria classification
-    df_sorted["Multicriteria Class"] = df_sorted["Classification"] + "-" + df_sorted["Hits Classification"]
+    # Aliases for hits
+    df_sorted["Cumulative Hits"] = df_sorted["Cumulative Hits Total"]
+    df_sorted["Hits Percentage"] = df_sorted["Percentage Hits"]
 
-    # 7. Class summary distribution table
+    # 6. Multicriteria composite classification
+    df_sorted["Multicriteria Class"] = df_sorted["Sales ($) Classification"] + "-" + df_sorted["Hits Classification"]
+
+    # 7. Sales ($) Class summary distribution table
     classes = ["A", "B", "C", "D"]
     total_items = len(df_sorted)
-    summary_rows = []
-    policy_map = {
+    sales_summary_rows = []
+    sales_policy_map = {
         "A": "Strict inventory control, continuous review, tight replenishment, high target service level",
         "B": "Moderate control, periodic review, standard safety stock buffer, automated reordering",
         "C": "Simplified control, larger order quantities, visual review / periodic batching",
         "D": "Candidate for rationalization/liquidation, make-to-order, minimal buffer stock"
     }
+    criteria_map = {
+        "A": "0% < x ≤ 60%",
+        "B": "60% < x ≤ 80%",
+        "C": "80% < x ≤ 90%",
+        "D": "90% < x"
+    }
 
+    cum_sales_pct_running = 0.0
     for cls in classes:
-        subset = df_sorted[df_sorted["Classification"] == cls]
+        subset = df_sorted[df_sorted["Sales ($) Classification"] == cls]
         cnt = len(subset)
         pct_items = (cnt / total_items * 100.0) if total_items > 0 else 0.0
         cls_sales = float(subset["_sales_clean"].sum())
         pct_sales = (cls_sales / total_sales * 100.0) if total_sales > 0 else 0.0
-        cls_hits = float(subset["_hits_clean"].sum())
-        pct_hits = (cls_hits / total_hits * 100.0) if total_hits > 0 else 0.0
+        cum_sales_pct_running += pct_sales
 
-        summary_rows.append({
+        sales_summary_rows.append({
             "Class": cls,
+            "Sales Criteria": criteria_map[cls],
             "Item Count": cnt,
             "% of Items": round(pct_items, 1),
             "Total Sales ($)": cls_sales,
             "% of Sales": round(pct_sales, 1),
+            "Cumulative Sales %": round(cum_sales_pct_running, 1),
+            "Management Policy": sales_policy_map[cls]
+        })
+    sales_summary_df = pd.DataFrame(sales_summary_rows)
+
+    # 8. Hits Class summary distribution table
+    hits_summary_rows = []
+    hits_policy_map = {
+        "A": "Fast Movers: Prime warehouse picking slotting (golden zone), frequent replenishment",
+        "B": "Medium Movers: Standard shelf/rack slotting, periodic picking replenishment",
+        "C": "Slow Movers: Upper or lower rack storage, batch picking consolidation",
+        "D": "Very Slow Movers / Dead Stock: Reserve or remote storage, review for obsolete stock purge"
+    }
+
+    cum_hits_pct_running = 0.0
+    for cls in classes:
+        subset = df_sorted[df_sorted["Hits Classification"] == cls]
+        cnt = len(subset)
+        pct_items = (cnt / total_items * 100.0) if total_items > 0 else 0.0
+        cls_hits = float(subset["_hits_clean"].sum())
+        pct_hits = (cls_hits / total_hits * 100.0) if total_hits > 0 else 0.0
+        cum_hits_pct_running += pct_hits
+
+        hits_summary_rows.append({
+            "Class": cls,
+            "Hits Criteria": criteria_map[cls],
+            "Item Count": cnt,
+            "% of Items": round(pct_items, 1),
             "Total Hits": cls_hits,
             "% of Hits": round(pct_hits, 1),
-            "Recommended Policy": policy_map[cls]
+            "Cumulative Hits %": round(cum_hits_pct_running, 1),
+            "Warehouse Policy": hits_policy_map[cls]
         })
-    class_summary_df = pd.DataFrame(summary_rows)
+    hits_summary_df = pd.DataFrame(hits_summary_rows)
 
-    # 8. 4x4 Multicriteria Cross-Tabulation Matrix
+    # 9. 4x4 Multicriteria Cross-Tabulation Matrix
     base_matrix = pd.crosstab(
-        df_sorted["Classification"],
+        df_sorted["Sales ($) Classification"],
         df_sorted["Hits Classification"]
     )
     for cls in ["A", "B", "C", "D"]:
@@ -489,7 +619,9 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         "total_sales": total_sales,
         "total_hits": total_hits,
         "total_items": total_items,
-        "class_summary": class_summary_df,
+        "class_summary": sales_summary_df,
+        "sales_summary": sales_summary_df,
+        "hits_summary": hits_summary_df,
         "crosstab_matrix": crosstab_matrix,
         "crosstab_with_totals": crosstab_with_totals,
         "sales_col": sales_col,
