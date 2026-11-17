@@ -686,6 +686,7 @@ def calculate_periodic_review(
     current_on_hand: Optional[float] = None,
     current_on_order: float = 0.0,
     backorders: float = 0.0,
+    safety_stock: Optional[float] = None,
 ) -> InventoryResult:
     """
     Calculate Fixed-Period Review (Periodic Review / Order-Up-To) Policy:
@@ -703,8 +704,8 @@ def calculate_periodic_review(
         raise ValueError("Missing required numerical input: 'lead_time' (L) must be provided.")
     if demand_mean is None:
         raise ValueError("Missing required numerical input: 'demand_mean' (d) must be provided.")
-    if service_level is None:
-        raise ValueError("Missing required numerical input: 'service_level' (CSL) must be provided.")
+    if service_level is None and safety_stock is None:
+        raise ValueError("Missing required numerical input: 'service_level' (CSL) or explicit 'safety_stock' must be provided.")
 
     if not isinstance(review_period, (int, float)) or review_period <= 0:
         raise ValueError(f"Review period T must be > 0, got {review_period}")
@@ -715,9 +716,12 @@ def calculate_periodic_review(
     if not isinstance(demand_std, (int, float)) or demand_std < 0:
         raise ValueError(f"Demand std cannot be negative, got {demand_std}")
 
-    csl = float(service_level)
-    if csl <= 0.0 or csl >= 1.0:
-        raise ValueError(f"Service level must be strictly in (0, 1), got {service_level}")
+    if service_level is not None:
+        csl = float(service_level)
+        if csl <= 0.0 or csl >= 1.0:
+            raise ValueError(f"Service level must be strictly in (0, 1), got {service_level}")
+    else:
+        csl = None
 
     P = float(review_period)
     L = float(lead_time)
@@ -727,17 +731,23 @@ def calculate_periodic_review(
     # 2. Mathematical Calculations
     # Protection period = review period + lead time
     protection_period = P + L
-    z = standard_normal_ppf(csl)
 
     # Demand during protection period
     expected_demand_protection = d * protection_period
     std_demand_protection = sigma_d * math.sqrt(protection_period)
 
     # Safety stock
-    safety_stock = z * std_demand_protection
+    if safety_stock is not None:
+        calc_ss = float(safety_stock)
+        z = calc_ss / std_demand_protection if std_demand_protection > 0 else 0.0
+        if csl is None and std_demand_protection > 0:
+            csl = standard_normal_cdf(z)
+    else:
+        z = standard_normal_ppf(csl)
+        calc_ss = z * std_demand_protection
 
     # Target inventory = demand during protection period + safety stock
-    target_inventory = expected_demand_protection + safety_stock
+    target_inventory = expected_demand_protection + calc_ss
 
     # Determine inventory position
     # If explicitly passed, use it; else if current_on_hand passed, derive it
@@ -754,11 +764,12 @@ def calculate_periodic_review(
         order_quantity = max(0.0, target_inventory - inv_pos)
 
     # 3. Model Assumptions
+    csl_str = f"Target cycle service level CSL = {csl * 100:.2f}% (z = {z:.4f})" if csl is not None else f"Safety stock fixed at {calc_ss} units"
     assumptions = [
         f"Inventory is reviewed periodically at fixed intervals of T = {P} periods.",
         f"Protection period covers review period + lead time: T + L = {protection_period} periods.",
         "Demand per period is independent and identically distributed with constant mean and variance.",
-        f"Target cycle service level CSL = {csl * 100:.2f}% (z = {z:.4f}) over the protection interval.",
+        f"{csl_str} over the protection interval.",
         "Order quantity brings the current inventory position up to the target inventory level: max(0, Target - IP).",
         "If inventory position already meets or exceeds target inventory, order quantity is 0."
     ]
@@ -774,6 +785,7 @@ def calculate_periodic_review(
         "current_on_hand": current_on_hand,
         "current_on_order": current_on_order,
         "backorders": backorders,
+        "safety_stock": calc_ss,
     }
 
     intermediates_dict = {
@@ -781,7 +793,7 @@ def calculate_periodic_review(
         "expected_demand_during_protection": round(expected_demand_protection, 2),
         "std_dev_during_protection": round(std_demand_protection, 2),
         "z_score": round(z, 4),
-        "safety_stock": round(safety_stock, 2),
+        "safety_stock": round(calc_ss, 2),
         "target_inventory": round(target_inventory, 2),
         "inventory_position": round(inv_pos, 2) if inv_pos is not None else None,
         "order_quantity": round(order_quantity, 2) if order_quantity is not None else None,
@@ -790,7 +802,7 @@ def calculate_periodic_review(
     final_answer_dict = {
         "target_inventory": round(target_inventory, 2),
         "protection_period": round(protection_period, 2),
-        "safety_stock": round(safety_stock, 2),
+        "safety_stock": round(calc_ss, 2),
         "recommended_order_quantity": round(order_quantity, 2) if order_quantity is not None else None,
         "inventory_position": round(inv_pos, 2) if inv_pos is not None else None,
     }
@@ -807,11 +819,11 @@ def calculate_periodic_review(
         "protection_interval": round(protection_period, 2),
         "demand_mean_per_period": round(d, 2),
         "demand_std_per_period": round(sigma_d, 2),
-        "service_level": round(csl, 4),
+        "service_level": round(csl, 4) if csl is not None else None,
         "z_score": round(z, 4),
         "expected_demand_protection_interval": round(expected_demand_protection, 2),
         "std_demand_protection_interval": round(std_demand_protection, 2),
-        "safety_stock": round(safety_stock, 2),
+        "safety_stock": round(calc_ss, 2),
         "order_up_to_level_S": round(target_inventory, 2),
         "target_inventory_level": round(target_inventory, 2),
         "inventory_on_hand": round(current_on_hand, 2) if current_on_hand is not None else 0.0,
@@ -838,6 +850,8 @@ def calculate_newsvendor(
     demand_std: Optional[float] = None,
     salvage_value: float = 0.0,
     goodwill_cost: float = 0.0,
+    underage_cost: Optional[float] = None,
+    overage_cost: Optional[float] = None,
 ) -> InventoryResult:
     """
     Calculate Newsvendor Model parameters:
@@ -850,46 +864,55 @@ def calculate_newsvendor(
     Never invents missing numerical inputs.
     """
     # 1. Input Validation
-    if selling_price is None:
-        raise ValueError("Missing required numerical input: 'selling_price' must be provided.")
-    if purchase_cost is None:
-        raise ValueError("Missing required numerical input: 'purchase_cost' must be provided.")
+    has_direct_cu_co = (underage_cost is not None and overage_cost is not None)
+
+    if not has_direct_cu_co:
+        if selling_price is None:
+            raise ValueError("Missing required numerical input: 'selling_price' must be provided (or provide 'underage_cost' and 'overage_cost').")
+        if purchase_cost is None:
+            raise ValueError("Missing required numerical input: 'purchase_cost' must be provided (or provide 'underage_cost' and 'overage_cost').")
+
     if demand_mean is None:
         raise ValueError("Missing required numerical input: 'demand_mean' must be provided.")
     if demand_std is None:
         raise ValueError("Missing required numerical input: 'demand_std' must be provided.")
 
-    if not isinstance(selling_price, (int, float)) or selling_price <= 0:
-        raise ValueError(f"Selling price must be > 0, got {selling_price}")
-    if not isinstance(purchase_cost, (int, float)) or purchase_cost <= 0:
-        raise ValueError(f"Purchase cost must be > 0, got {purchase_cost}")
-    if selling_price < purchase_cost:
-        raise ValueError(f"Selling price (${selling_price}) cannot be less than purchase cost (${purchase_cost})")
-    if salvage_value > purchase_cost:
-        raise ValueError(f"Salvage value (${salvage_value}) cannot exceed purchase cost (${purchase_cost})")
     if not isinstance(demand_mean, (int, float)) or demand_mean <= 0:
         raise ValueError(f"Demand mean must be > 0, got {demand_mean}")
     if not isinstance(demand_std, (int, float)) or demand_std < 0:
         raise ValueError(f"Demand standard deviation cannot be negative, got {demand_std}")
 
-    p = float(selling_price)
-    c = float(purchase_cost)
     s = float(salvage_value)
     g = float(goodwill_cost)
     mu = float(demand_mean)
     sigma = float(demand_std)
 
-    # 2. Mathematical Calculations
-    # Underage cost: Cu = p - c + g
-    cu = p - c + g
-    # Overage cost: Co = c - s
-    co = c - s
+    if has_direct_cu_co:
+        cu = float(underage_cost)
+        co = float(overage_cost)
+        p = float(selling_price) if selling_price is not None else None
+        c = float(purchase_cost) if purchase_cost is not None else None
+    else:
+        if not isinstance(selling_price, (int, float)) or selling_price <= 0:
+            raise ValueError(f"Selling price must be > 0, got {selling_price}")
+        if not isinstance(purchase_cost, (int, float)) or purchase_cost <= 0:
+            raise ValueError(f"Purchase cost must be > 0, got {purchase_cost}")
+        if selling_price < purchase_cost:
+            raise ValueError(f"Selling price (${selling_price}) cannot be less than purchase cost (${purchase_cost})")
+        if salvage_value > purchase_cost:
+            raise ValueError(f"Salvage value (${salvage_value}) cannot exceed purchase cost (${purchase_cost})")
+
+        p = float(selling_price)
+        c = float(purchase_cost)
+        cu = p - c + g
+        co = c - s
 
     if cu <= 0:
         raise ValueError(f"Cost of underage Cu must be > 0, got {cu}")
     if co <= 0:
         raise ValueError(f"Cost of overage Co must be > 0, got {co}")
 
+    # 2. Mathematical Calculations
     # Critical ratio: CR = Cu / (Cu + Co)
     cr = cu / (cu + co)
 
@@ -904,7 +927,6 @@ def calculate_newsvendor(
         exp_leftover = q_star - mu + exp_lost_sales
         exp_sales = mu - exp_lost_sales
     else:
-        # Zero variance: deterministic demand
         z_star = 0.0
         q_star = mu
         effective_z = 0.0
@@ -912,27 +934,38 @@ def calculate_newsvendor(
         exp_leftover = 0.0
         exp_sales = mu
 
-    exp_rev = p * exp_sales
-    exp_cost = c * q_star
-    exp_salvage = s * exp_leftover
-    exp_penalty = g * exp_lost_sales
-    exp_profit = exp_rev + exp_salvage - exp_cost - exp_penalty
-
-    # Perfect information benchmark
-    pi_profit = (p - c) * mu
-    evpi = max(0.0, pi_profit - exp_profit)
     in_stock_prob = standard_normal_cdf(effective_z) if sigma > 0 else 1.0
 
+    if p is not None and c is not None:
+        exp_rev = p * exp_sales
+        exp_cost = c * q_star
+        exp_salvage = s * exp_leftover
+        exp_penalty = g * exp_lost_sales
+        exp_profit = exp_rev + exp_salvage - exp_cost - exp_penalty
+        pi_profit = (p - c) * mu
+        evpi = max(0.0, pi_profit - exp_profit)
+    else:
+        exp_rev = None
+        exp_cost = None
+        exp_salvage = None
+        exp_penalty = None
+        exp_profit = None
+        pi_profit = None
+        evpi = None
+
     # 3. Model Assumptions
+    cu_desc = f"Cost of underage Cu = ${cu:.2f}/unit" if has_direct_cu_co else f"Cost of underage Cu = p - c + g = ${cu:.2f}/unit (profit margin plus stockout penalty)."
+    co_desc = f"Cost of overage Co = ${co:.2f}/unit" if has_direct_cu_co else f"Cost of overage Co = c - s = ${co:.2f}/unit (loss per unit unsold)."
     assumptions = [
         "Single sales period for perishable, seasonal, or short-lifecycle items.",
         "A single replenishment order must be placed before demand is realized.",
         "Demand follows a normal distribution with known mean mu and std dev sigma.",
-        f"Cost of underage Cu = p - c + g = ${cu:.2f}/unit (profit margin plus stockout penalty).",
-        f"Cost of overage Co = c - s = ${co:.2f}/unit (loss per unit unsold).",
+        cu_desc,
+        co_desc,
         f"Critical ratio CR = Cu / (Cu + Co) = {cr:.4f} defines the optimal in-stock probability.",
-        "Unsold units at period end are salvaged at unit salvage value s with no disposal fee."
     ]
+    if not has_direct_cu_co:
+        assumptions.append("Unsold units at period end are salvaged at unit salvage value s with no disposal fee.")
 
     # 4. Structured Output
     inputs_dict = {
@@ -942,6 +975,8 @@ def calculate_newsvendor(
         "demand_std": sigma,
         "salvage_value": s,
         "goodwill_cost": g,
+        "underage_cost": cu,
+        "overage_cost": co,
     }
 
     intermediates_dict = {
@@ -952,13 +987,13 @@ def calculate_newsvendor(
         "expected_lost_sales": round(exp_lost_sales, 2),
         "expected_leftover_units": round(exp_leftover, 2),
         "expected_sales": round(exp_sales, 2),
-        "expected_revenue": round(exp_rev, 2),
-        "expected_purchase_cost": round(exp_cost, 2),
-        "expected_salvage_revenue": round(exp_salvage, 2),
-        "expected_goodwill_penalty": round(exp_penalty, 2),
-        "expected_profit": round(exp_profit, 2),
-        "expected_profit_perfect_information": round(pi_profit, 2),
-        "expected_value_of_perfect_information_EVPI": round(evpi, 2),
+        "expected_revenue": round(exp_rev, 2) if exp_rev is not None else None,
+        "expected_purchase_cost": round(exp_cost, 2) if exp_cost is not None else None,
+        "expected_salvage_revenue": round(exp_salvage, 2) if exp_salvage is not None else None,
+        "expected_goodwill_penalty": round(exp_penalty, 2) if exp_penalty is not None else None,
+        "expected_profit": round(exp_profit, 2) if exp_profit is not None else None,
+        "expected_profit_perfect_information": round(pi_profit, 2) if pi_profit is not None else None,
+        "expected_value_of_perfect_information_EVPI": round(evpi, 2) if evpi is not None else None,
         "in_stock_probability": round(in_stock_prob, 4),
     }
 
@@ -967,7 +1002,7 @@ def calculate_newsvendor(
         "critical_ratio": round(cr, 4),
         "cost_of_underage": round(cu, 2),
         "cost_of_overage": round(co, 2),
-        "expected_profit": round(exp_profit, 2),
+        "expected_profit": round(exp_profit, 2) if exp_profit is not None else None,
     }
 
     res = InventoryResult({
@@ -977,8 +1012,8 @@ def calculate_newsvendor(
         "final_answer": final_answer_dict,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
-        "selling_price": round(p, 2),
-        "purchase_cost": round(c, 2),
+        "selling_price": round(p, 2) if p is not None else None,
+        "purchase_cost": round(c, 2) if c is not None else None,
         "salvage_value": round(s, 2),
         "goodwill_cost": round(g, 2),
         "cost_underage_Cu": round(cu, 2),
@@ -992,13 +1027,13 @@ def calculate_newsvendor(
         "expected_lost_sales": round(exp_lost_sales, 2),
         "expected_leftover_units": round(exp_leftover, 2),
         "expected_sales": round(exp_sales, 2),
-        "expected_revenue": round(exp_rev, 2),
-        "expected_purchase_cost": round(exp_cost, 2),
-        "expected_salvage_revenue": round(exp_salvage, 2),
-        "expected_goodwill_penalty": round(exp_penalty, 2),
-        "expected_profit": round(exp_profit, 2),
-        "expected_profit_under_perfect_information": round(pi_profit, 2),
-        "expected_value_of_perfect_information_EVPI": round(evpi, 2),
+        "expected_revenue": round(exp_rev, 2) if exp_rev is not None else None,
+        "expected_purchase_cost": round(exp_cost, 2) if exp_cost is not None else None,
+        "expected_salvage_revenue": round(exp_salvage, 2) if exp_salvage is not None else None,
+        "expected_goodwill_penalty": round(exp_penalty, 2) if exp_penalty is not None else None,
+        "expected_profit": round(exp_profit, 2) if exp_profit is not None else None,
+        "expected_profit_under_perfect_information": round(pi_profit, 2) if pi_profit is not None else None,
+        "expected_value_of_perfect_information_EVPI": round(evpi, 2) if evpi is not None else None,
         "in_stock_probability": round(in_stock_prob, 4),
     })
     return res

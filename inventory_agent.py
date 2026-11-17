@@ -90,7 +90,9 @@ class InventoryAgent:
         newsvendor_keywords = [
             "newsvendor", "newsboy", "perishable", "spoil", "salvage", "critical fractile",
             "single period", "single season", "fashion item", "newspaper", "leftover",
-            "underage", "overage", "markdown", "liquidation", "perish", "event-based"
+            "underage", "overage", "markdown", "liquidation", "perish", "event-based",
+            "shortage cost", "excess cost", "cost of shortage", "cost of excess",
+            "one-day", "one day", "single day", "concert"
         ]
         for kw in newsvendor_keywords:
             if kw in q_lower:
@@ -98,23 +100,25 @@ class InventoryAgent:
 
         if "salvage" in q_lower or "salvage value" in q_lower:
             scores[InventoryModelType.NEWSVENDOR] += 4.0
-        if "critical fractile" in q_lower or "underage cost" in q_lower or "overage cost" in q_lower:
-            scores[InventoryModelType.NEWSVENDOR] += 5.0
+        if any(term in q_lower for term in ["critical fractile", "underage cost", "overage cost", "shortage cost", "excess cost"]):
+            scores[InventoryModelType.NEWSVENDOR] += 6.0
 
         # 2. Fixed-Period Review signals
         fixed_period_keywords = [
             "periodic review", "fixed period", "review period", "order-up-to", "order up to",
             "target inventory", "inventory position", "protection interval", "every week",
             "every 2 weeks", "every month", "reviewed every", "review interval", "p-system",
-            "(t, s)", "order up to level"
+            "(t, s)", "order up to level", "periodic"
         ]
         for kw in fixed_period_keywords:
             if kw in q_lower:
                 scores[InventoryModelType.FIXED_PERIOD_REVIEW] += 2.5
 
         if "order-up-to" in q_lower or "order up to" in q_lower or "inventory position" in q_lower:
-            scores[InventoryModelType.FIXED_PERIOD_REVIEW] += 4.5
-        if "review period" in q_lower or "reviewed every" in q_lower:
+            scores[InventoryModelType.FIXED_PERIOD_REVIEW] += 5.0
+        if "review period" in q_lower or "reviewed every" in q_lower or re.search(r"review.*every", q_lower) or re.search(r"every\s+\d+\s+days", q_lower):
+            scores[InventoryModelType.FIXED_PERIOD_REVIEW] += 5.0
+        if ("on hand" in q_lower or "on-hand" in q_lower) and ("on order" in q_lower or "on-order" in q_lower):
             scores[InventoryModelType.FIXED_PERIOD_REVIEW] += 4.0
 
         # 3. Quantity Discount signals
@@ -201,50 +205,58 @@ class InventoryAgent:
         """
         Extract numerical and contextual parameters from natural language input
         tailored to the target inventory model.
+        Recognizes common inventory terminology and synonyms.
+        Examines the entire question before deciding that information is missing.
         """
         q = question
-
         extracted: Dict[str, Any] = {}
+
+        NUM_PATTERN = r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)"
+        CONNECTIVES = r"(?:is|of|for|at|=|:|averages?|costs?|takes?|equals?|about|to\s+purchase|to\s+buy|is\s+constant\s+at|constant\s+at|is\s+fixed\s+at|fixed\s+at|we\s+have|we\s+currently\s+have|there\s+are)?"
+
+        def clean_num(val_str: Optional[str]) -> Optional[float]:
+            if val_str is None:
+                return None
+            cleaned = str(val_str).replace(",", "").strip().rstrip(".;,")
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
 
         # Generic number regex helpers
         def find_number_after(patterns: List[str], text: str, default: Optional[float] = None) -> Optional[float]:
             for pat in patterns:
-                # Matches pattern followed by optional non-numeric bridge words, optional $, number (with optional commas and decimals)
-                regex = rf"(?:{pat})[^0-9\n\.\;]*?(?:is|of|for|at|=|:|averages?|takes?)?\s*[\$]?\s*([0-9]{{1,3}}(?:,[0-9]{{3}})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)"
+                regex = rf"\b(?:{pat})\s*{CONNECTIVES}\s*[\$]?\s*{NUM_PATTERN}(?!\s*%)"
                 match = re.search(regex, text, re.IGNORECASE)
                 if match:
-                    val_str = match.group(1).replace(",", "")
-                    try:
-                        return float(val_str)
-                    except ValueError:
-                        continue
+                    val = clean_num(match.group(1))
+                    if val is not None:
+                        return val
             return default
 
         def find_number_before(patterns: List[str], text: str, default: Optional[float] = None) -> Optional[float]:
             for pat in patterns:
-                regex = rf"([0-9]{{1,3}}(?:,[0-9]{{3}})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:{pat})"
+                regex = rf"[\$]?\s*{NUM_PATTERN}\s*[- ]?(?:units|dollars|days?|weeks?|months?)?\s*(?:(?:to|per|for|in|of)\s*)?(?:{pat})\b"
                 match = re.search(regex, text, re.IGNORECASE)
                 if match:
-                    val_str = match.group(1).replace(",", "")
-                    try:
-                        return float(val_str)
-                    except ValueError:
-                        continue
+                    val = clean_num(match.group(1))
+                    if val is not None:
+                        return val
             return default
 
         def find_percentage(patterns: List[str], text: str, default: Optional[float] = None) -> Optional[float]:
-            # 1. Check percentage BEFORE pattern: e.g. "95% cycle service level"
+            # 1. Check percentage BEFORE pattern: e.g. "95% cycle service level" or "20% holding cost"
             for pat in patterns:
-                m_before = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:cycle\s*)?{pat}", text, re.IGNORECASE)
+                m_before = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent)\s*(?:cycle\s*)?(?:{pat})\b", text, re.IGNORECASE)
                 if m_before:
                     try:
                         pct = float(m_before.group(1))
                         return pct / 100.0 if pct > 1.0 else pct
                     except ValueError:
                         continue
-            # 2. Check percentage AFTER pattern: e.g. "cycle service level of 95%" or "cycle service level averages 95%"
+            # 2. Check percentage AFTER pattern: e.g. "cycle service level of 95%" or "holding rate is 25%"
             for pat in patterns:
-                regex = rf"(?:{pat})[^0-9\n\.\;]*?(?:is|of|for|at|=|:|averages?)?\s*([0-9]+(?:\.[0-9]+)?)\s*%"
+                regex = rf"\b(?:{pat})\s*{CONNECTIVES}\s*([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent)"
                 match = re.search(regex, text, re.IGNORECASE)
                 if match:
                     try:
@@ -252,7 +264,7 @@ class InventoryAgent:
                         return pct / 100.0 if pct > 1.0 else pct
                     except ValueError:
                         continue
-                regex_dec = rf"(?:{pat})[^0-9\n\.\;]*?(?:is|of|for|at|=|:|averages?)?\s*(0\.[0-9]+)"
+                regex_dec = rf"\b(?:{pat})\s*{CONNECTIVES}\s*(0\.[0-9]+)"
                 match_dec = re.search(regex_dec, text, re.IGNORECASE)
                 if match_dec:
                     try:
@@ -264,250 +276,575 @@ class InventoryAgent:
         # ------------------ Model-specific extraction ------------------
 
         if model_type == InventoryModelType.EOQ:
-            # Annual demand
+            # 1. Annual demand (D)
             d = find_number_after(
-                ["annual demand", "demand per year", "yearly demand", "sells", "sell", "demand of", "demand is", "annual sales"],
+                [
+                    r"annual\s+demand", r"demand\s+per\s+year", r"yearly\s+demand",
+                    r"demand\s+of", r"demand\s+is", r"annual\s+sales", r"annual\s+volume",
+                    r"consumption\s+per\s+year", r"sells", r"sell"
+                ],
                 q
             )
             if d is None:
-                # Check for generic "demand of X units"
-                d = find_number_after(["demand", "volume"], q)
+                d = find_number_before(
+                    [
+                        r"units\s+demand\s+annually", r"units\s+of\s+demand\s+annually",
+                        r"units\s+demand\s+per\s+year", r"units\s+demand\s+yearly",
+                        r"units\s+per\s+year", r"units\s+annually", r"units\s+a\s+year",
+                        r"units\s+yearly", r"yearly\s+demand", r"annual\s+demand"
+                    ],
+                    q
+                )
+            if d is None:
+                d = find_number_after([r"demand", r"volume"], q)
             extracted["annual_demand"] = d
 
-            # Ordering / Setup cost
-            s = find_number_after(
-                ["order cost", "ordering cost", "setup cost", "cost per order", "cost to place an order", "fixed cost per order"],
-                q
-            )
+            # 2. Ordering / Setup cost (S)
+            # Mandated synonyms:
+            # - ordering cost
+            # - order cost
+            # - setup cost
+            # - setup expense
+            # - cost per order
+            # - cost of placing an order
+            # - ordering/setup cost (and variants)
+            order_cost_patterns = [
+                r"ordering/setup\s+expense",
+                r"ordering/setup\s+cost",
+                r"ordering\s*/\s*setup\s+cost",
+                r"ordering\s+and\s+setup\s+cost",
+                r"order/setup\s+cost",
+                r"cost\s+of\s+placing\s+an\s+order",
+                r"cost\s+to\s+place\s+an\s+order",
+                r"cost\s+per\s+order",
+                r"setup\s+expense",
+                r"setup\s+cost",
+                r"ordering\s+cost",
+                r"order\s+cost",
+                r"fixed\s+cost\s+per\s+order",
+                r"fixed\s+order\s+cost",
+                r"per\s+order",
+            ]
+            s = find_number_before(order_cost_patterns, q)
+            if s is None:
+                s = find_number_after(order_cost_patterns, q)
             extracted["order_cost"] = s
 
-            # Unit purchase price
-            c = find_number_after(
-                ["unit price", "purchase price", "cost per unit", "item cost", "purchase cost", "unit cost", "costs", "price of"],
-                q
-            )
-            extracted["unit_price"] = c
-
-            # Holding cost (dollar amount)
-            h = find_number_after(
-                ["holding cost per unit", "unit holding cost", "carrying cost per unit", "holding cost of", "holding cost is"],
-                q
-            )
+            # 3. Holding cost (dollar amount H, strictly not percentage)
+            holding_cost_patterns = [
+                r"holding\s+cost\s+per\s+unit", r"unit\s+holding\s+cost",
+                r"carrying\s+cost\s+per\s+unit", r"holding\s+cost\s+of",
+                r"holding\s+cost\s+is", r"holding\s+cost", r"carrying\s+cost",
+                r"storage\s+cost\s+per\s+unit", r"storage\s+cost"
+            ]
+            h = find_number_after(holding_cost_patterns, q)
+            if h is None:
+                h = find_number_before([r"per\s+unit\s+holding\s+cost", r"holding\s+cost", r"carrying\s+cost"], q)
             extracted["holding_cost"] = h
 
-            # Holding rate (% of price)
+            # 4. Unit purchase price (C)
+            unit_price_patterns = [
+                r"unit\s+purchase\s+price", r"purchase\s+price", r"unit\s+price",
+                r"item\s+cost", r"purchase\s+cost", r"cost\s+to\s+purchase",
+                r"unit\s+cost", r"price\s+per\s+unit", r"price\s+of"
+            ]
+            c = find_number_after(unit_price_patterns, q)
+            if c is None:
+                c = find_number_before([r"unit\s+price", r"purchase\s+price", r"item\s+cost"], q)
+            if c is not None and h is not None and c == h:
+                if not re.search(r"(?:purchase\s+price|unit\s+price|unit\s+purchase\s+price|purchase\s+cost)\s*[:=]?\s*[\$]?\s*" + str(c), q, re.IGNORECASE):
+                    c = None
+            extracted["unit_price"] = c
+
+            # 5. Holding rate (h / I, % of unit price)
             h_rate = find_percentage(
-                ["holding cost rate", "carrying rate", "holding rate", "annual holding cost is", "holding cost of", "carrying cost of", "holding cost"],
+                [
+                    r"holding\s+cost\s+rate", r"carrying\s+rate", r"holding\s+rate",
+                    r"annual\s+holding\s+rate", r"carrying\s+cost\s+rate",
+                    r"holding\s+cost\s+is", r"carrying\s+cost\s+is",
+                    r"holding\s+cost\s+of", r"carrying\s+cost\s+of", r"holding\s+cost", r"carrying\s+cost"
+                ],
                 q
             )
             extracted["holding_rate"] = h_rate
 
-            # Lead time days / ROP deterministic
-            lt = find_number_after(
-                ["lead time of", "lead time is", "lead time", "delivery time"],
-                q
-            )
+            # 6. Lead time days & working days
+            lt = find_number_after([r"lead\s+time\s+of", r"lead\s+time\s+is", r"lead\s+time", r"delivery\s+time"], q)
+            if lt is None:
+                lt = find_number_before([r"days\s+lead\s+time", r"day\s+lead\s+time"], q)
             extracted["lead_time_days"] = lt
 
-            # Working days
-            wd = find_number_after(["working days", "operational days", "operating days", "days per year"], q)
+            wd = find_number_after([r"working\s+days", r"operational\s+days", r"operating\s+days", r"days\s+per\s+year"], q)
             extracted["working_days_per_year"] = int(wd) if wd is not None else self.working_days_default
 
         elif model_type == InventoryModelType.QUANTITY_DISCOUNT:
-            # Annual demand
+            # 1. Annual demand
             d = find_number_after(
-                ["annual demand", "demand per year", "yearly demand", "demand of", "demand is"],
+                [
+                    r"annual\s+demand", r"demand\s+per\s+year", r"yearly\s+demand",
+                    r"demand\s+of", r"demand\s+is", r"annual\s+sales", r"annual\s+volume", r"sells"
+                ],
                 q
             )
+            if d is None:
+                d = find_number_before([r"units\s+per\s+year", r"units\s+annually", r"yearly\s+demand", r"annual\s+demand"], q)
+            if d is None:
+                d = find_number_after([r"demand", r"volume"], q)
             extracted["annual_demand"] = d
 
-            # Order cost
-            s = find_number_after(
-                ["order cost", "ordering cost", "setup cost", "cost per order", "cost to place an order"],
-                q
-            )
+            # 2. Ordering cost (same synonyms as EOQ)
+            order_cost_patterns = [
+                r"ordering/setup\s+expense",
+                r"ordering/setup\s+cost",
+                r"ordering\s*/\s*setup\s+cost",
+                r"ordering\s+and\s+setup\s+cost",
+                r"order/setup\s+cost",
+                r"cost\s+of\s+placing\s+an\s+order",
+                r"cost\s+to\s+place\s+an\s+order",
+                r"cost\s+per\s+order",
+                r"setup\s+expense",
+                r"setup\s+cost",
+                r"ordering\s+cost",
+                r"order\s+cost",
+                r"fixed\s+cost\s+per\s+order",
+                r"fixed\s+order\s+cost",
+                r"per\s+order",
+            ]
+            s = find_number_before(order_cost_patterns, q)
+            if s is None:
+                s = find_number_after(order_cost_patterns, q)
             extracted["order_cost"] = s
 
-            # Holding rate or holding cost
+            # 3. Holding rate (% of price)
             h_rate = find_percentage(
-                ["holding rate", "carrying rate", "holding cost rate", "holding cost is", "carrying cost is", "holding cost of"],
+                [
+                    r"holding\s+rate", r"carrying\s+rate", r"holding\s+cost\s+rate",
+                    r"annual\s+holding\s+rate", r"carrying\s+cost\s+rate",
+                    r"holding\s+cost\s+is", r"carrying\s+cost\s+is",
+                    r"holding\s+cost\s+of", r"carrying\s+cost\s+of", r"holding\s+cost", r"carrying\s+cost"
+                ],
                 q
             )
             extracted["holding_rate"] = h_rate
 
+            # 4. Fixed holding cost (dollar amount)
             h_cost = find_number_after(
-                ["holding cost per unit", "unit holding cost", "carrying cost per unit", "holding cost"],
+                [
+                    r"fixed\s+holding\s+cost", r"holding\s+cost\s+per\s+unit",
+                    r"unit\s+holding\s+cost", r"carrying\s+cost\s+per\s+unit",
+                    r"holding\s+cost\s+is", r"holding\s+cost\s+of", r"holding\s+cost", r"carrying\s+cost"
+                ],
                 q
             )
+            if h_cost is None:
+                h_cost = find_number_before([r"per\s+unit\s+holding\s+cost", r"holding\s+cost", r"carrying\s+cost"], q)
             extracted["holding_cost"] = h_cost
 
-            # Discount schedule extraction
+            # 5. Unit purchase price (base price)
+            base_p = find_number_after([r"base\s+price", r"base\s+unit\s+price", r"regular\s+price", r"unit\s+price", r"purchase\s+price"], q)
+            extracted["unit_price"] = base_p
+
+            # 6. Discount schedule extraction (quantity breaks & tiered unit prices)
             schedule = self._parse_discount_schedule(q)
             extracted["discount_schedule"] = schedule
 
         elif model_type == InventoryModelType.SAFETY_STOCK_ROP:
-            # Service level
+            # 1. Service Level
             csl = find_percentage(
-                ["service level", "cycle service level", "csl", "target in-stock", "in-stock rate", "desired service level"],
+                [
+                    r"cycle\s+service\s+level", r"service\s+level", r"csl",
+                    r"in-stock\s+probability", r"in-stock\s+rate", r"target\s+in-stock",
+                    r"customer\s+service\s+level", r"desired\s+service\s+level"
+                ],
                 q
             )
             if csl is None:
-                # Check for z-score directly
-                z = find_number_after(["z-score", "z score", "z value"], q)
+                z = find_number_after([r"z-score", r"z\s+score", r"z\s+value", r"z\s*="], q)
                 if z is not None:
                     csl = it.standard_normal_cdf(z)
             extracted["service_level"] = csl
 
-            # Daily demand mean and std
-            d_mean = find_number_after(
-                ["daily demand is", "daily demand of", "average daily demand", "mean daily demand", "daily demand", "demand per day", "average demand"],
-                q
-            )
+            # 2. Lead-Time Standard Deviation (must specifically match lead time context)
+            lt_std = None
+            lt_std_patterns_after = [
+                r"lead[- ]time\s+(?:demand\s+)?standard\s+deviation",
+                r"lead[- ]time\s+std(?:\s+dev)?",
+                r"standard\s+deviation\s+of\s+(?:the\s+)?lead[- ]time",
+                r"std(?:\s+dev)?\s+of\s+(?:the\s+)?lead[- ]time",
+                r"lead[- ]time\s+has\s+a\s+standard\s+deviation\s+of",
+                r"lead[- ]time\s+has\s+a\s+std(?:\s+dev)?\s+of",
+                r"std(?:\s+dev)?\s+in\s+lead[- ]time",
+                r"variance\s+in\s+lead[- ]time",
+            ]
+            for pat in lt_std_patterns_after:
+                m = re.search(rf"\b(?:{pat})\s*{CONNECTIVES}\s*{NUM_PATTERN}(?!\s*%)", q, re.IGNORECASE)
+                if m:
+                    lt_std = clean_num(m.group(1))
+                    break
+            if lt_std is None:
+                lt_std_patterns_before = [
+                    r"lead[- ]time\s+standard\s+deviation",
+                    r"lead[- ]time\s+std(?:\s+dev)?",
+                    r"standard\s+deviation\s+(?:of\s+)?lead[- ]time",
+                    r"std(?:\s+dev)?\s+(?:of\s+)?lead[- ]time",
+                ]
+                for pat in lt_std_patterns_before:
+                    m = re.search(rf"{NUM_PATTERN}\s*(?:days?|weeks?|periods?|units?)?\s*(?:in|of)?\s*(?:{pat})\b", q, re.IGNORECASE)
+                    if m:
+                        lt_std = clean_num(m.group(1))
+                        break
+            extracted["lead_time_std_days"] = lt_std if lt_std is not None else 0.0
+
+            # 3. Average Lead Time (must distinguish from lead time std dev)
+            lt_mean = None
+            lt_patterns_after = [
+                r"average\s+lead[- ]time", r"mean\s+lead[- ]time", r"expected\s+lead[- ]time",
+                r"lead[- ]time\s+averages?", r"lead[- ]time\s+is\s+constant\s+at",
+                r"lead[- ]time\s+is\s+fixed\s+at", r"lead[- ]time\s+is", r"lead[- ]time\s+of",
+                r"lead[- ]time", r"supplier\s+lead[- ]time", r"replenishment\s+lead[- ]time",
+                r"delivery\s+time", r"delivery\s+takes", r"takes"
+            ]
+            for pat in lt_patterns_after:
+                regex = rf"\b(?:{pat})\s*{CONNECTIVES}\s*{NUM_PATTERN}\s*(?:days?|weeks?|months?|business\s+days?|operating\s+days?|working\s+days?)(?!\s*%)"
+                m = re.search(regex, q, re.IGNORECASE)
+                if m:
+                    val = clean_num(m.group(1))
+                    if val != lt_std:
+                        lt_mean = val
+                        break
+            if lt_mean is None:
+                for pat in lt_patterns_after:
+                    regex = rf"\b(?:{pat})\s*{CONNECTIVES}\s*{NUM_PATTERN}(?!\s*%)"
+                    m = re.search(regex, q, re.IGNORECASE)
+                    if m:
+                        val = clean_num(m.group(1))
+                        if val != lt_std:
+                            lt_mean = val
+                            break
+            if lt_mean is None:
+                m = re.search(rf"{NUM_PATTERN}\s*[- ]?(?:days?|weeks?|operating\s+days?)\s+(?:of\s+)?lead[- ]time", q, re.IGNORECASE)
+                if m:
+                    lt_mean = clean_num(m.group(1))
+            extracted["lead_time_days"] = lt_mean
+
+            # 4. Demand Standard Deviation (strictly excludes lead time context)
+            d_std = None
+            d_std_patterns_after = [
+                r"demand\s+standard\s+deviation",
+                r"standard\s+deviation\s+of\s+(?:daily\s+|weekly\s+)?demand",
+                r"std(?:\s+dev)?\s+of\s+(?:daily\s+|weekly\s+)?demand",
+                r"daily\s+demand\s+standard\s+deviation",
+                r"daily\s+demand\s+std(?:\s+dev)?",
+                r"weekly\s+demand\s+standard\s+deviation",
+                r"weekly\s+demand\s+std(?:\s+dev)?",
+                r"demand\s+std(?:\s+dev)?",
+            ]
+            for pat in d_std_patterns_after:
+                m = re.search(rf"\b(?:{pat})\s*{CONNECTIVES}\s*{NUM_PATTERN}(?!\s*%)", q, re.IGNORECASE)
+                if m:
+                    d_std = clean_num(m.group(1))
+                    break
+            if d_std is None:
+                # Search clauses that do NOT contain 'lead'
+                clauses = re.split(r"[,;.\n]", q)
+                for clause in clauses:
+                    if "lead" not in clause.lower() and any(k in clause.lower() for k in ["standard deviation", "std dev", "std"]):
+                        m = re.search(rf"(?:standard\s+deviation|std(?:\s+dev)?)\s*{CONNECTIVES}\s*{NUM_PATTERN}(?!\s*%)", clause, re.IGNORECASE)
+                        if m:
+                            d_std = clean_num(m.group(1))
+                            break
+            extracted["daily_demand_std"] = d_std if d_std is not None else 0.0
+
+            # 5. Average Demand
+            d_mean = None
+            d_mean_patterns = [
+                r"average\s+daily\s+demand", r"mean\s+daily\s+demand",
+                r"daily\s+demand\s+is\s+constant\s+at", r"daily\s+demand\s+is\s+fixed\s+at",
+                r"demand\s+is\s+constant\s+at", r"demand\s+is\s+fixed\s+at",
+                r"average\s+weekly\s+demand", r"mean\s+weekly\s+demand",
+                r"daily\s+demand\s+averages?", r"weekly\s+demand\s+averages?",
+                r"normally\s+distributed\s+with\s+a?\s*mean", r"distributed\s+with\s+a?\s*mean",
+                r"average\s+demand", r"mean\s+demand", r"expected\s+demand",
+                r"daily\s+demand\s+is", r"daily\s+demand\s+of", r"weekly\s+demand\s+is", r"weekly\s+demand\s+of",
+                r"daily\s+demand", r"weekly\s+demand", r"demand\s+averages?",
+                r"with\s+a?\s*mean", r"mean\s+of", r"mean\s*=", r"mean\s*:",
+                r"demand\s+is", r"demand\s+of", r"constant\s+at"
+            ]
+            for pat in d_mean_patterns:
+                m = re.search(rf"\b(?:{pat})\s*{CONNECTIVES}\s*{NUM_PATTERN}(?!\s*%)", q, re.IGNORECASE)
+                if m:
+                    val = clean_num(m.group(1))
+                    if val != d_std and val != lt_std and val != lt_mean:
+                        d_mean = val
+                        break
+            if d_mean is None:
+                for pat in d_mean_patterns:
+                    m = re.search(rf"{NUM_PATTERN}\s*(?:units)?\s*(?:per\s+day|daily|per\s+week|weekly)?\s*(?:{pat})\b", q, re.IGNORECASE)
+                    if m:
+                        d_mean = clean_num(m.group(1))
+                        break
             extracted["daily_demand_mean"] = d_mean
 
-            d_std = find_number_after(
-                ["standard deviation of daily demand", "daily standard deviation", "daily std dev", "daily std", "standard deviation of demand", "standard deviation of", "std dev of demand", "std dev of", "demand standard deviation", "standard deviation", "std dev", "std"],
-                q
-            )
-            extracted["daily_demand_std"] = d_std
-
-            # Lead time days
-            lt = find_number_after(
-                ["lead time is", "lead time of", "average lead time", "mean lead time", "lead time"],
-                q
-            )
-            extracted["lead_time_days"] = lt
-
-            lt_std = find_number_after(
-                ["lead time standard deviation", "standard deviation of lead time", "lead time std dev", "lead time std"],
-                q,
-                default=0.0
-            )
-            extracted["lead_time_std_days"] = lt_std
-
-            # Lead time demand direct
+            # 6. Direct Lead Time Demand Distribution (if given directly as mu_LTD, sigma_LTD)
             ltd_mean = find_number_after(
-                ["lead time demand is", "lead time demand of", "mean lead time demand", "average lead time demand", "demand during lead time"],
+                [r"lead\s+time\s+demand\s+is", r"lead\s+time\s+demand\s+of", r"mean\s+lead\s+time\s+demand", r"average\s+lead\s+time\s+demand", r"demand\s+during\s+lead\s+time"],
                 q
             )
             extracted["lead_time_demand_mean"] = ltd_mean
 
             ltd_std = find_number_after(
-                ["standard deviation of lead time demand", "std dev of lead time demand", "lead time demand std", "lead time demand standard deviation"],
+                [r"standard\s+deviation\s+of\s+lead\s+time\s+demand", r"std\s+dev\s+of\s+lead\s+time\s+demand", r"lead\s+time\s+demand\s+std", r"lead\s+time\s+demand\s+standard\s+deviation"],
                 q
             )
             extracted["lead_time_demand_std"] = ltd_std
 
-            # Holding cost
-            h = find_number_after(["holding cost", "carrying cost"], q)
+            # 7. Holding cost per unit
+            h = find_number_after([r"holding\s+cost", r"carrying\s+cost"], q)
             extracted["holding_cost_per_unit"] = h
 
         elif model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
-            # Review period T
+            # 1. Review period T
             t = find_number_after(
-                ["review period", "review interval", "reviewed every", "order every", "period of", "cycle time", "every"],
+                [
+                    r"review\s+period", r"review\s+interval", r"reviewed\s+every",
+                    r"order\s+every", r"orders\s+placed\s+every", r"order\s+interval",
+                    r"review\s+cadence", r"cadence\s+of", r"period\s+of", r"cycle\s+time"
+                ],
                 q
             )
+            if t is None:
+                m_t = re.search(r"every\s+([0-9]+(?:\.[0-9]+)?)\s*(?:days?|weeks?|months?)", q, re.IGNORECASE)
+                if m_t:
+                    t = clean_num(m_t.group(1))
+                else:
+                    t = find_number_before([r"days\s+review\s+period", r"weeks\s+review\s+period"], q)
             extracted["review_period"] = t
 
-            # Lead time L
+            # 2. Lead time L
             lt = find_number_after(
-                ["lead time is", "lead time of", "lead time", "delivery time", "takes"],
+                [
+                    r"lead[- ]time\s+is", r"lead[- ]time\s+of", r"lead[- ]time",
+                    r"delivery\s+time", r"delivery\s+takes", r"supplier\s+lead[- ]time",
+                    r"replenishment\s+lead[- ]time", r"takes"
+                ],
                 q
             )
+            if lt is None:
+                lt = find_number_before(
+                    [
+                        r"days?\s+lead[- ]time", r"weeks?\s+lead[- ]time", r"days?\s+delivery",
+                        r"weeks?\s+delivery", r"lead[- ]time", r"lead\s+time"
+                    ],
+                    q
+                )
+            if lt is None:
+                m_lt = re.search(rf"{NUM_PATTERN}\s*[- ]?(?:days?|weeks?|months?)\s+(?:of\s+)?lead[- ]time", q, re.IGNORECASE)
+                if m_lt:
+                    lt = clean_num(m_lt.group(1))
             extracted["lead_time"] = lt
 
-            # Demand mean and std
-            d_mean = find_number_after(
-                ["average demand", "mean demand", "demand rate", "weekly demand", "daily demand", "demand is", "demand of"],
+            # 3. Demand Mean and Std
+            d_std = find_number_after(
+                [
+                    r"demand\s+standard\s+deviation", r"standard\s+deviation\s+of\s+demand",
+                    r"std(?:\s+dev)?\s+of\s+demand", r"weekly\s+demand\s+standard\s+deviation",
+                    r"daily\s+demand\s+standard\s+deviation", r"demand\s+std(?:\s+dev)?",
+                    r"standard\s+deviation\s+of", r"standard\s+deviation", r"std\s+dev"
+                ],
                 q
             )
+            extracted["demand_std"] = d_std if d_std is not None else 0.0
+
+            d_mean = find_number_after(
+                [
+                    r"average\s+demand", r"mean\s+demand", r"expected\s+demand",
+                    r"weekly\s+demand", r"daily\s+demand", r"demand\s+averages?",
+                    r"demand\s+is", r"demand\s+of", r"with\s+a?\s*mean", r"mean\s+of"
+                ],
+                q
+            )
+            if d_mean is None:
+                d_mean = find_number_before([r"units\s+per\s+week", r"units\s+per\s+day", r"weekly\s+demand", r"daily\s+demand", r"average\s+demand"], q)
             extracted["demand_mean"] = d_mean
 
-            d_std = find_number_after(
-                ["demand standard deviation", "standard deviation of demand", "standard deviation of", "std dev of demand", "std dev of", "demand std", "standard deviation", "std dev", "std"],
-                q
-            )
-            extracted["demand_std"] = d_std
-
-            # Service level
+            # 4. Service level
             csl = find_percentage(
-                ["service level", "cycle service level", "csl", "target in-stock", "in-stock probability"],
+                [r"service\s+level", r"cycle\s+service\s+level", r"csl", r"target\s+in-stock", r"in-stock\s+probability"],
                 q
             )
             extracted["service_level"] = csl
 
-            # On-hand, on-order, backorders (supports both prefix and suffix patterns)
+            # 5. Safety stock (explicit parameter)
+            ss = find_number_after([r"safety\s+stock", r"safety\s+buffer", r"buffer\s+stock", r"target\s+safety\s+stock"], q)
+            if ss is None:
+                ss = find_number_before([r"units\s+safety\s+stock", r"safety\s+stock", r"safety\s+buffer"], q)
+            extracted["safety_stock"] = ss
+
+            # 6. Inventory position (explicit parameter)
+            inv_pos = find_number_after([r"inventory\s+position", r"current\s+inventory\s+position", r"system\s+inventory\s+position"], q)
+            if inv_pos is None:
+                inv_pos = find_number_before([r"units\s+inventory\s+position", r"inventory\s+position"], q)
+            extracted["inventory_position"] = inv_pos
+
+            # 7. On-hand inventory
             oh = find_number_after(
-                ["on hand is", "on-hand is", "current inventory is", "current stock is", "on hand:", "on-hand:", "stock in warehouse"],
-                q,
-                default=None
+                [
+                    r"on[- ]hand\s+inventory", r"inventory\s+on[- ]hand", r"stock\s+on[- ]hand",
+                    r"on[- ]hand\s+is", r"on[- ]hand\s+of", r"on[- ]hand:", r"on[- ]hand",
+                    r"on\s+hand\s+is", r"on\s+hand\s+of", r"on\s+hand:", r"on\s+hand",
+                    r"currently\s+have", r"current\s+stock", r"current\s+inventory",
+                    r"in\s+warehouse", r"currently\s+in\s+stock"
+                ],
+                q
             )
             if oh is None:
-                oh = find_number_before(["on hand", "on-hand", "in stock", "in warehouse"], q, default=0.0)
-            extracted["current_on_hand"] = oh
+                oh = find_number_before([r"on[- ]hand", r"on\s+hand", r"in\s+stock", r"in\s+the\s+warehouse", r"in\s+warehouse"], q)
+            extracted["current_on_hand"] = oh if oh is not None else (0.0 if inv_pos is None else None)
 
+            # 8. On-order inventory
             oo = find_number_after(
-                ["on order is", "on-order is", "in transit is", "scheduled receipts is", "on order:", "on-order:"],
-                q,
-                default=None
+                [
+                    r"on[- ]order\s+inventory", r"inventory\s+on[- ]order",
+                    r"on[- ]order\s+is", r"on[- ]order\s+of", r"on[- ]order:", r"on[- ]order",
+                    r"on\s+order\s+is", r"on\s+order\s+of", r"on\s+order:", r"on\s+order",
+                    r"in\s+transit", r"pipeline\s+inventory", r"scheduled\s+receipts", r"orders\s+outstanding"
+                ],
+                q
             )
             if oo is None:
-                oo = find_number_before(["on order", "on-order", "in transit", "scheduled receipts"], q, default=0.0)
-            extracted["current_on_order"] = oo
+                oo = find_number_before([r"on[- ]order", r"on\s+order", r"in\s+transit", r"scheduled\s+receipts"], q)
+            extracted["current_on_order"] = oo if oo is not None else 0.0
 
+            # 9. Backorders
             bo = find_number_after(
-                ["backorders is", "backlog is", "backordered is", "backorders:", "backlog:"],
-                q,
-                default=None
+                [
+                    r"backorders?\s+is", r"backorders?\s+of", r"backorders?:", r"backorders?",
+                    r"backlog\s+is", r"backlog\s+of", r"backlog:", r"backlog",
+                    r"backordered\s+is", r"backordered", r"unfilled\s+orders?", r"unfilled\s+customer\s+demand"
+                ],
+                q
             )
             if bo is None:
-                bo = find_number_before(["backorders", "backlog", "backordered", "unfilled orders"], q, default=0.0)
-            extracted["backorders"] = bo
+                bo = find_number_before([r"backorders?", r"backordered", r"on\s+backorder", r"backlog", r"unfilled\s+orders?"], q)
+            extracted["backorders"] = bo if bo is not None else 0.0
 
         elif model_type == InventoryModelType.NEWSVENDOR:
-            # Selling price
-            p = find_number_after(
-                ["retail selling price", "selling price", "retail price", "sale price", "revenue per unit", "price per unit", "sold for", "sells for", "sells", "price is", "price of"],
+            # 1. Underage / Shortage Cost (Cu)
+            cu = find_number_after(
+                [
+                    r"underage\s+cost", r"cost\s+of\s+underage", r"shortage\s+cost",
+                    r"cost\s+of\s+shortage", r"underage\s*/\s*shortage\s+cost",
+                    r"loss\s+per\s+unmet\s+demand", r"loss\s+per\s+lost\s+sale",
+                    r"stockout\s+penalty", r"penalty\s+cost"
+                ],
                 q
             )
+            if cu is None:
+                cu = find_number_before([r"shortage\s+cost", r"underage\s+cost", r"stockout\s+penalty"], q)
+            extracted["underage_cost"] = cu
+
+            # 2. Overage / Excess Cost (Co)
+            co = find_number_after(
+                [
+                    r"overage\s+cost", r"cost\s+of\s+overage", r"excess\s+cost",
+                    r"cost\s+of\s+excess", r"overage\s*/\s*excess\s+cost",
+                    r"excess\s+inventory\s+cost", r"loss\s+per\s+unsold\s+unit"
+                ],
+                q
+            )
+            if co is None:
+                co = find_number_before([r"overage\s+cost", r"excess\s+cost", r"loss\s+per\s+unsold\s+unit"], q)
+            extracted["overage_cost"] = co
+
+            # 3. Salvage Value
+            salvage = find_number_after(
+                [
+                    r"salvage\s+value", r"salvage\s+price", r"salvaged\s+for",
+                    r"salvaged\s+at", r"markdown\s+price", r"markdown\s+value",
+                    r"liquidation\s+value", r"liquidation\s+price", r"scrap\s+value",
+                    r"residual\s+value", r"salvage"
+                ],
+                q
+            )
+            if salvage is None:
+                salvage = find_number_before([r"salvage\s+value", r"salvage\s+price", r"markdown\s+price", r"liquidation\s+value"], q)
+            extracted["salvage_value"] = salvage if salvage is not None else 0.0
+
+            # 4. Selling Price (p)
+            p = find_number_after(
+                [
+                    r"retail\s+selling\s+price", r"selling\s+price", r"retail\s+price",
+                    r"sale\s+price", r"revenue\s+per\s+unit", r"price\s+per\s+unit",
+                    r"sells?\s+(?:[a-zA-Z\s]{1,25}?)\s+for", r"sold\s+for", r"sells\s+for",
+                    r"sells\s+at", r"price\s+is", r"price\s+of"
+                ],
+                q
+            )
+            if p is None:
+                p = find_number_before([r"selling\s+price", r"retail\s+price", r"sale\s+price", r"retail\s+selling\s+price"], q)
+            if p == salvage and salvage is not None:
+                p = None
             extracted["selling_price"] = p
 
-            # Purchase cost
-            c = find_number_after(
-                ["purchase cost", "acquisition cost", "wholesale price", "cost per unit", "procurement cost", "costs us", "costs", "bought for", "cost of", "unit cost"],
-                q
-            )
+            # 5. Purchase Cost (c)
+            c = None
+            c_patterns = [
+                r"purchase\s+cost", r"acquisition\s+cost", r"wholesale\s+price",
+                r"wholesale\s+cost", r"procurement\s+cost", r"cost\s+per\s+unit",
+                r"unit\s+cost", r"bought\s+for", r"buys\s+for", r"costs?\s+us",
+                r"costs?\s+[\$]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s+to\s+(?:purchase|buy|produce|procure)",
+                r"cost\s+to\s+(?:purchase|buy|produce|procure)", r"cost\s+is", r"cost\s+of"
+            ]
+            for pat in c_patterns:
+                if "(" in pat:
+                    m = re.search(pat, q, re.IGNORECASE)
+                    if m:
+                        val = clean_num(m.group(1))
+                        if val != cu and val != co and val != salvage and val != p:
+                            c = val
+                            break
+                else:
+                    m = re.search(rf"\b(?:{pat})\s*{CONNECTIVES}\s*[\$]?\s*{NUM_PATTERN}(?!\s*%)", q, re.IGNORECASE)
+                    if m:
+                        val = clean_num(m.group(1))
+                        if val != cu and val != co and val != salvage and val != p:
+                            c = val
+                            break
+            if c is None:
+                c = find_number_before([r"purchase\s+cost", r"wholesale\s+price", r"wholesale\s+cost", r"unit\s+cost", r"procurement\s+cost"], q)
             extracted["purchase_cost"] = c
 
-            # Salvage value
-            s = find_number_after(
-                ["salvage value", "salvage price", "salvaged for", "salvaged at", "salvaged", "markdown price", "liquidation value", "scrap value", "residual value", "discounted to", "salvage"],
-                q,
-                default=0.0
-            )
-            extracted["salvage_value"] = s
-
-            # Goodwill cost / penalty
-            g = find_number_after(
-                ["goodwill penalty", "goodwill cost", "penalty cost", "stockout penalty", "unmet demand penalty"],
-                q,
-                default=0.0
-            )
+            # 6. Goodwill cost / penalty
+            g = find_number_after([r"goodwill\s+penalty", r"goodwill\s+cost", r"unmet\s+demand\s+penalty"], q, default=0.0)
             extracted["goodwill_cost"] = g
 
-            # Demand mean and std
-            d_mean = find_number_after(
-                ["mean demand", "average demand", "expected demand", "demand mean", "demand is normally distributed with mean", "mean of", "demand of"],
-                q
-            )
-            extracted["demand_mean"] = d_mean
-
+            # 7. Demand Mean and Std
             d_std = find_number_after(
-                ["standard deviation of demand", "demand standard deviation", "standard deviation of", "std dev of demand", "std dev of", "standard deviation", "std dev", "std of", "std"],
+                [
+                    r"demand\s+standard\s+deviation", r"standard\s+deviation\s+of\s+demand",
+                    r"std(?:\s+dev)?\s+of\s+demand", r"demand\s+std(?:\s+dev)?",
+                    r"standard\s+deviation\s+of", r"standard\s+deviation", r"std\s+dev", r"std"
+                ],
                 q
             )
             extracted["demand_std"] = d_std
+
+            d_mean = find_number_after(
+                [
+                    r"normally\s+distributed\s+with\s+a?\s*mean", r"distributed\s+with\s+a?\s*mean",
+                    r"mean\s+demand", r"average\s+demand", r"expected\s+demand",
+                    r"demand\s+mean", r"demand\s+averages?", r"with\s+a?\s*mean",
+                    r"mean\s+of", r"mean\s*=", r"mean\s*:", r"demand\s+is", r"demand\s+of"
+                ],
+                q
+            )
+            if d_mean is None:
+                d_mean = find_number_before([r"units\s+average\s+demand", r"units\s+mean\s+demand", r"units\s+demand"], q)
+            extracted["demand_mean"] = d_mean
+
+            # 8. Demand distribution
+            is_normal = bool(re.search(r"normal(?:ly)?(?:\s+distributed)?", q, re.IGNORECASE))
+            extracted["demand_distribution"] = "normal" if is_normal else "normal"
 
         return extracted
 
@@ -516,56 +853,121 @@ class InventoryAgent:
         Extract tier brackets and unit prices from natural language text.
         Supports patterns like:
         - "0-499: $15, 500-999: $14, 1000+: $13"
-        - "under 500: $20; 500 to 999: $18; 1000 or more: $16"
-        - "tier 1: 0 to 499 at $10, tier 2: 500+ at $8"
+        - "under 500 units: $20; 500 to 999 units: $18; 1000 or more: $16"
+        - "supplier offers a price break at 500 units: unit price is $50 for orders below 500 and $45 for orders of 500 or more"
+        - "price break of $18 for 300+ units, otherwise $20"
+        - "Tier 1: 0 to 499 at $10.00, Tier 2: 500 to 999 at $9.50, Tier 3: 1000+ at $9.00"
         """
         tiers: List[Dict[str, Any]] = []
+
+        def clean_tier_num(val_str: Any) -> Optional[float]:
+            if val_str is None:
+                return None
+            s = str(val_str).replace(",", "").strip().rstrip(".;,")
+            try:
+                return float(s)
+            except ValueError:
+                return None
 
         # Isolate schedule section if present
         sched_match = re.search(r"(?:schedule|tiers|supplier offers)[:\s]+(.*)", text, re.IGNORECASE)
         sched_text = sched_match.group(1) if sched_match else text
 
-        # Pattern A: range "min - max : $price" or "min to max at $price"
+        # Format 0 (Specific sentence break): e.g. "price break of $18 for 300+ units, otherwise $20"
+        break_match = re.search(
+            r"price\s+break\s+of\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)\s*for\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\+?\s*units?(?:,\s*otherwise\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?))?",
+            sched_text,
+            re.IGNORECASE
+        )
+        if break_match:
+            discount_price = clean_tier_num(break_match.group(1))
+            break_qty = clean_tier_num(break_match.group(2))
+            base_price = clean_tier_num(break_match.group(3))
+            if base_price:
+                tiers.append({"min_qty": 0.0, "max_qty": break_qty - 1.0, "price": base_price})
+            tiers.append({"min_qty": break_qty, "max_qty": None, "price": discount_price})
+            return sorted(tiers, key=lambda x: x["min_qty"])
+
+        # Format 1: Range "min - max : $price" or "min to max at $price"
         range_pattern = re.findall(
-            r"([0-9]+)\s*(?:-|–|to)\s*([0-9]+)\s*(?:units)?\s*(?:is|at|:|costs)?\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
+            r"([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(?:-|–|to)\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(?:units)?\s*(?:is|at|:|costs?)?\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
             sched_text,
             re.IGNORECASE
         )
         for min_q, max_q, price in range_pattern:
-            tiers.append({
-                "min_qty": float(min_q),
-                "max_qty": float(max_q),
-                "price": float(price)
-            })
+            p = clean_tier_num(price)
+            if p and p > 0:
+                tiers.append({
+                    "min_qty": clean_tier_num(min_q),
+                    "max_qty": clean_tier_num(max_q),
+                    "price": p
+                })
 
-        # Pattern B: open-ended top tier "1000+ : $8" or "1000 or more at $8" or "over 1000: $8"
+        # Format 2a: Open-ended upper tier "1000+ : $8" or "1000 or more at $8" or "over 1000: $8"
         open_pattern = re.findall(
-            r"([0-9]+)\s*(?:\+|or more|and above|units or more|\+ units)\s*(?:is|at|:|costs)?\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
+            r"(?:orders\s+of\s+|orders\s+)?([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(?:\+|or\s+more|and\s+above|\+?\s*units\s+or\s+more|\+?\s*units\s+and\s+above)\s*(?:is|at|:|costs)\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
             sched_text,
             re.IGNORECASE
         )
         for min_q, price in open_pattern:
-            # Check if this min_q is already captured with a max_q
-            if not any(t["min_qty"] == float(min_q) for t in tiers):
+            mq = clean_tier_num(min_q)
+            p = clean_tier_num(price)
+            if p and p > 0 and not any(t["min_qty"] == mq for t in tiers):
                 tiers.append({
-                    "min_qty": float(min_q),
+                    "min_qty": mq,
                     "max_qty": None,
-                    "price": float(price)
+                    "price": p
                 })
 
-        # Pattern C: "under X: $price" (e.g. under 500 units costs $10)
+        # Format 2b: Price BEFORE open-ended tier: e.g. "$45 for orders of 500 or more", "$16 for 1000+ units"
+        open_price_before = re.findall(
+            r"[\$]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:for\s+orders\s+of|for\s+orders|for)?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(?:\+|or\s+more|and\s+above|\+?\s*units\s+or\s+more|\+?\s*units\s+and\s+above)",
+            sched_text,
+            re.IGNORECASE
+        )
+        for price, min_q in open_price_before:
+            mq = clean_tier_num(min_q)
+            p = clean_tier_num(price)
+            if p and p > 0 and not any(t["min_qty"] == mq for t in tiers):
+                tiers.append({
+                    "min_qty": mq,
+                    "max_qty": None,
+                    "price": p
+                })
+
+        # Format 3a: Lower tier "under 500: $price" (e.g. under 500 units costs $10)
         under_pattern = re.findall(
-            r"(?:under|less than|up to)\s*([0-9]+)\s*(?:units)?\s*(?:is|at|:|costs)?\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
+            r"(?:orders\s+)?(?:under|less\s+than|below|up\s+to)\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(?:units)?\s*(?:is|at|:|costs)\s*[\$]?\s*([0-9]+(?:\.[0-9]+)?)",
             sched_text,
             re.IGNORECASE
         )
         for max_q, price in under_pattern:
-            if not any(t.get("max_qty") == float(max_q) - 1 or t.get("max_qty") == float(max_q) for t in tiers):
-                tiers.append({
-                    "min_qty": 0.0,
-                    "max_qty": float(max_q) - 1.0,
-                    "price": float(price)
-                })
+            mq = clean_tier_num(max_q)
+            p = clean_tier_num(price)
+            if p is not None and p > 0:
+                if not any(t.get("max_qty") in [mq, mq - 1.0] for t in tiers):
+                    tiers.append({
+                        "min_qty": 0.0,
+                        "max_qty": mq - 1.0,
+                        "price": p
+                    })
+
+        # Format 3b: Price BEFORE lower tier: e.g. "$50 for orders below 500", "$20 for under 500 units"
+        under_price_before = re.findall(
+            r"[\$]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:for\s+orders\s+of|for\s+orders|for)?\s*(?:under|less\s+than|below|up\s+to)\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
+            sched_text,
+            re.IGNORECASE
+        )
+        for price, max_q in under_price_before:
+            mq = clean_tier_num(max_q)
+            p = clean_tier_num(price)
+            if p is not None and p > 0:
+                if not any(t.get("max_qty") in [mq, mq - 1.0] for t in tiers):
+                    tiers.append({
+                        "min_qty": 0.0,
+                        "max_qty": mq - 1.0,
+                        "price": p
+                    })
 
         # Sort and deduplicate tiers by min_qty
         if tiers:
@@ -635,21 +1037,25 @@ class InventoryAgent:
                 review_period=inputs["review_period"],
                 lead_time=inputs["lead_time"],
                 demand_mean=inputs["demand_mean"],
-                demand_std=inputs["demand_std"],
-                service_level=inputs["service_level"],
-                current_on_hand=inputs.get("current_on_hand", 0.0),
+                demand_std=inputs.get("demand_std", 0.0),
+                service_level=inputs.get("service_level"),
+                inventory_position=inputs.get("inventory_position"),
+                current_on_hand=inputs.get("current_on_hand"),
                 current_on_order=inputs.get("current_on_order", 0.0),
-                backorders=inputs.get("backorders", 0.0)
+                backorders=inputs.get("backorders", 0.0),
+                safety_stock=inputs.get("safety_stock"),
             )
 
         elif model_type == InventoryModelType.NEWSVENDOR:
             return it.calculate_newsvendor(
-                selling_price=inputs["selling_price"],
-                purchase_cost=inputs["purchase_cost"],
+                selling_price=inputs.get("selling_price"),
+                purchase_cost=inputs.get("purchase_cost"),
                 demand_mean=inputs["demand_mean"],
                 demand_std=inputs["demand_std"],
                 salvage_value=inputs.get("salvage_value", 0.0),
-                goodwill_cost=inputs.get("goodwill_cost", 0.0)
+                goodwill_cost=inputs.get("goodwill_cost", 0.0),
+                underage_cost=inputs.get("underage_cost"),
+                overage_cost=inputs.get("overage_cost"),
             )
 
         else:
@@ -846,9 +1252,12 @@ class InventoryAgent:
         elif model_type == InventoryModelType.NEWSVENDOR:
             exec_summary = (
                 f"**Optimal Decision:** Order **{results['optimal_order_quantity']:,.0f} units** for the single selling period. "
-                f"Based on a Critical Fractile of **{results['critical_fractile']:.1%}**, this yields an Expected Profit of "
-                f"**${results['expected_profit']:,.2f}** and an in-stock availability of **{results['in_stock_probability']:.1%}**."
+                f"Based on a Critical Fractile of **{results['critical_fractile']:.1%}**, this yields an in-stock availability of **{results['in_stock_probability']:.1%}**"
             )
+            if results.get("expected_profit") is not None:
+                exec_summary += f" and an Expected Profit of **${results['expected_profit']:,.2f}**."
+            else:
+                exec_summary += "."
 
         else:
             exec_summary = "Model could not be determined."
@@ -914,7 +1323,10 @@ class InventoryAgent:
 
         elif model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
             lines.append(f"1. **Protection Interval:** $T + L = {results['review_period_T']} + {results['lead_time_L']} = {results['protection_interval']}$ time units.")
-            lines.append(f"2. **Target Service Level:** CSL = {results['service_level']:.1%} $\\implies z = {results['z_score']:.4f}$.")
+            if results.get("service_level") is not None:
+                lines.append(f"2. **Target Service Level:** CSL = {results['service_level']:.1%} $\\implies z = {results['z_score']:.4f}$.")
+            else:
+                lines.append(f"2. **Safety Stock:** Pre-specified buffer of {results['safety_stock']:,.2f} units.")
             lines.append(f"3. **Expected Demand over Protection Interval:** $d \\times (T + L) = {results['demand_mean_per_period']} \\times {results['protection_interval']} = {results['expected_demand_protection_interval']:,.2f}$ units.")
             lines.append(f"4. **Std Dev over Protection Interval:** $\\sigma_d \\times \\sqrt{{T + L}} = {results['demand_std_per_period']} \\times \\sqrt{{{results['protection_interval']}}} = {results['std_demand_protection_interval']:,.2f}$ units.")
             lines.append(f"5. **Safety Stock (SS):** $z \\times \\sigma_{{T+L}} = {results['z_score']:.4f} \\times {results['std_demand_protection_interval']:,.2f} = \\mathbf{{{results['safety_stock']:,.2f}}}$ units.")
@@ -923,16 +1335,22 @@ class InventoryAgent:
             lines.append(f"8. **Recommended Order Quantity (Q):** $\\max(0, S - IP) = \\max(0, {results['order_up_to_level_S']:,.2f} - {results['current_inventory_position']:,.0f}) = \\mathbf{{{results['recommended_order_quantity']:,.2f}}}$ units.")
 
         elif model_type == InventoryModelType.NEWSVENDOR:
-            lines.append(f"1. **Cost of Underage ($C_u$):** $p - c + g = \\${results['selling_price']:,.2f} - \\${results['purchase_cost']:,.2f} + \\${results['goodwill_cost']:,.2f} = \\mathbf{{\\${results['cost_underage_Cu']:,.2f}}}$.")
-            lines.append(f"2. **Cost of Overage ($C_o$):** $c - s = \\${results['purchase_cost']:,.2f} - \\${results['salvage_value']:,.2f} = \\mathbf{{\\${results['cost_overage_Co']:,.2f}}}$.")
+            if results.get("selling_price") is not None and results.get("purchase_cost") is not None:
+                lines.append(f"1. **Cost of Underage ($C_u$):** $p - c + g = \\${results['selling_price']:,.2f} - \\${results['purchase_cost']:,.2f} + \\${results['goodwill_cost']:,.2f} = \\mathbf{{\\${results['cost_underage_Cu']:,.2f}}}$.")
+                lines.append(f"2. **Cost of Overage ($C_o$):** $c - s = \\${results['purchase_cost']:,.2f} - \\${results['salvage_value']:,.2f} = \\mathbf{{\\${results['cost_overage_Co']:,.2f}}}$.")
+            else:
+                lines.append(f"1. **Cost of Underage ($C_u$):** Pre-specified shortage cost = $\\mathbf{{\\${results['cost_underage_Cu']:,.2f}}}$.")
+                lines.append(f"2. **Cost of Overage ($C_o$):** Pre-specified excess cost = $\\mathbf{{\\${results['cost_overage_Co']:,.2f}}}$.")
             lines.append(f"3. **Critical Fractile ($CF$):** $\\frac{{C_u}}{{C_u + C_o}} = \\frac{{{results['cost_underage_Cu']:,.2f}}}{{{results['cost_underage_Cu']:,.2f} + {results['cost_overage_Co']:,.2f}}} = \\mathbf{{{results['critical_fractile']:.4f}}}$ ({results['critical_fractile']:.2%}).")
             lines.append(f"4. **Optimal Safety Factor ($z^*$):** $\\Phi^{{-1}}({results['critical_fractile']:.4f}) = {results['z_score']:.4f}$.")
             lines.append(f"5. **Optimal Order Quantity ($Q^*$):** $\\mu + z^* \\sigma = {results['demand_mean']:,.0f} + ({results['z_score']:.4f} \\times {results['demand_std']:,.0f}) = \\mathbf{{{results['optimal_order_quantity']:,.2f}}}$ units.")
             lines.append(f"6. **Expected Lost Sales:** {results['expected_lost_sales']:,.2f} units.")
             lines.append(f"7. **Expected Leftover Inventory:** {results['expected_leftover_units']:,.2f} units.")
             lines.append(f"8. **Expected Sales:** {results['expected_sales']:,.2f} units.")
-            lines.append(f"9. **Expected Profit:** $\\mathbf{{\\${results['expected_profit']:,.2f}}}$.")
-            lines.append(f"10. **Value of Perfect Information (EVPI):** $\\${results['expected_value_of_perfect_information_EVPI']:,.2f}$.")
+            if results.get("expected_profit") is not None:
+                lines.append(f"9. **Expected Profit:** $\\mathbf{{\\${results['expected_profit']:,.2f}}}$.")
+            if results.get("expected_value_of_perfect_information_EVPI") is not None:
+                lines.append(f"10. **Value of Perfect Information (EVPI):** $\\${results['expected_value_of_perfect_information_EVPI']:,.2f}$.")
 
         lines.append("")
         lines.append("### ✅ Verification & Quality Audit")
@@ -958,7 +1376,8 @@ class InventoryAgent:
             lines.append("- **Consolidated Shipments:** Fixed-period review is ideal when grouping orders for multiple products from the same vendor to share transportation setup costs.")
         elif model_type == InventoryModelType.NEWSVENDOR:
             lines.append(f"- **Margin Cushion:** With a high margin ($C_u = \\${results['cost_underage_Cu']:,.2f}$ vs $C_o = \\${results['cost_overage_Co']:,.2f}$), the cost of turning away customers far exceeds salvage loss, justifying generous stocking.")
-            lines.append(f"- **Demand Forecasting:** The EVPI of ${results['expected_value_of_perfect_information_EVPI']:,.2f} represents the maximum dollar amount your firm should pay for advanced market research or demand sensing tools.")
+            if results.get("expected_value_of_perfect_information_EVPI") is not None:
+                lines.append(f"- **Demand Forecasting:** The EVPI of ${results['expected_value_of_perfect_information_EVPI']:,.2f} represents the maximum dollar amount your firm should pay for advanced market research or demand sensing tools.")
 
         detailed_explanation = "\n".join(lines)
         return exec_summary, detailed_explanation
@@ -970,6 +1389,7 @@ class InventoryAgent:
         """
         Execute the full 6-stage pipeline:
         Customer Question → Identify Model → Extract Inputs → Select Python Tool → Calculate → Verify → Explain
+        Examines the entire question before declaring information missing.
         """
         # 1. Identify Model
         model_type, confidence = self.identify_model(question)
@@ -992,13 +1412,13 @@ class InventoryAgent:
         # 2. Extract Inputs
         raw_inputs = self.extract_inputs(question, model_type)
 
-        # Validate mandatory inputs per model
+        # Validate mandatory inputs per model (examine full context before declaring missing)
         missing_fields = []
         if model_type == InventoryModelType.EOQ:
             if raw_inputs.get("annual_demand") is None:
                 missing_fields.append("annual_demand")
             if raw_inputs.get("order_cost") is None:
-                missing_fields.append("order_cost")
+                missing_fields.append("order_cost (ordering cost, order cost, setup cost, setup expense, cost per order, cost of placing an order, ordering/setup cost)")
             if raw_inputs.get("holding_cost") is None and (raw_inputs.get("unit_price") is None or raw_inputs.get("holding_rate") is None):
                 missing_fields.append("holding_cost (or unit_price and holding_rate)")
 
@@ -1008,9 +1428,9 @@ class InventoryAgent:
             if raw_inputs.get("order_cost") is None:
                 missing_fields.append("order_cost")
             if not raw_inputs.get("discount_schedule"):
-                missing_fields.append("discount_schedule (tiers with quantity ranges and unit prices)")
+                missing_fields.append("discount_schedule (quantity breaks and unit prices)")
             if raw_inputs.get("holding_cost") is None and raw_inputs.get("holding_rate") is None:
-                missing_fields.append("holding_cost or holding_rate")
+                missing_fields.append("holding_cost (fixed) or holding_rate (percentage)")
 
         elif model_type == InventoryModelType.SAFETY_STOCK_ROP:
             if raw_inputs.get("service_level") is None:
@@ -1027,16 +1447,14 @@ class InventoryAgent:
                 missing_fields.append("lead_time")
             if raw_inputs.get("demand_mean") is None:
                 missing_fields.append("demand_mean")
-            if raw_inputs.get("demand_std") is None:
-                missing_fields.append("demand_std")
-            if raw_inputs.get("service_level") is None:
-                missing_fields.append("service_level")
+            if raw_inputs.get("service_level") is None and raw_inputs.get("safety_stock") is None:
+                missing_fields.append("service_level or explicit safety_stock")
 
         elif model_type == InventoryModelType.NEWSVENDOR:
-            if raw_inputs.get("selling_price") is None:
-                missing_fields.append("selling_price")
-            if raw_inputs.get("purchase_cost") is None:
-                missing_fields.append("purchase_cost")
+            has_direct_cu_co = (raw_inputs.get("underage_cost") is not None and raw_inputs.get("overage_cost") is not None)
+            has_prices = (raw_inputs.get("selling_price") is not None and raw_inputs.get("purchase_cost") is not None)
+            if not has_direct_cu_co and not has_prices:
+                missing_fields.append("selling_price and purchase_cost (OR underage_cost and overage_cost)")
             if raw_inputs.get("demand_mean") is None:
                 missing_fields.append("demand_mean")
             if raw_inputs.get("demand_std") is None:
