@@ -1,10 +1,17 @@
-# Supply Chain Analytics Inventory Decision Agent
-# Core dependencies for computation, web dashboard, and testing
+# Supply Chain Analytics: Inventory Decision Agent Requirements
+# ==============================================================
+# The core mathematical calculation engine (inventory_tools.py) and
+# agent orchestration engine (inventory_agent.py) run out-of-the-box
+# on Python 3.8+ using ONLY standard libraries (math, statistics,
+# dataclasses, re, json, typing, unittest, argparse).
+#
+# The optional packages below enhance the user experience:
 
-streamlit>=1.28.0
-pandas>=2.0.0
-numpy>=1.24.0
-scipy>=1.10.0
+# Testing framework
+pytest>=7.0.0
+
+# Optional pretty table formatting in terminal environments
 tabulate>=0.9.0
-pytest>=7.4.0
-google-genai>=0.1.0
+
+# Optional rich web dashboard interface (run: streamlit run app.py)
+streamlit>=1.25.0

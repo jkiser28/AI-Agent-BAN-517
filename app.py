@@ -1,350 +1,356 @@
 """
 Supply Chain Analytics Inventory Decision Agent Application
-===========================================================
-Dual-mode application:
-  1. Interactive CLI Console: python3 app.py [--question "..."] [--demo]
-  2. Streamlit Web Dashboard: streamlit run app.py
+============================================================
+Interactive application providing natural language decision support for supply chain inventory managers.
 
-Implements the 6-stage architecture:
-  Customer Question -> Identify Model -> Extract Inputs -> Select Python Tool -> Calculate -> Verify -> Explain
+Architecture:
+Customer Question → Identify Model → Extract Inputs → Select Python Tool → Calculate → Verify → Explain
+
+Supports 5 Core Models:
+1. Economic Order Quantity (EOQ)
+2. Quantity Discount Model (Price Break)
+3. Safety Stock & Reorder Point (SS & ROP)
+4. Fixed-Period Review Model (Periodic Review / Order-Up-To Level)
+5. Newsvendor Model (Single-Period Stochastic Demand)
+
+Usage:
+    - Interactive CLI:       python3 app.py
+    - Single Question:       python3 app.py --question "We have annual demand of 12,000 units..."
+    - Run All Demos:         python3 app.py --demo
+    - Streamlit Web App:     streamlit run app.py
 """
 
-import sys
 import argparse
-from typing import Optional, List, Dict, Any
+import os
+import sys
+from typing import Dict, Any, List
 
-from inventory_agent import InventoryDecisionAgent, InventoryModelType, AgentDecisionResult
-from inventory_tools import (
-    calculate_eoq, EOQInputs,
-    calculate_quantity_discount, QuantityDiscountInputs, DiscountTier,
-    calculate_safety_stock_and_rop, SafetyStockROPInputs,
-    calculate_fixed_period_review, FixedPeriodReviewInputs,
-    calculate_newsvendor, NewsvendorInputs
-)
+from inventory_agent import InventoryAgent, InventoryModelType
 
-
-# ==============================================================================
-# Sample Benchmark Scenarios for Demos & Testing
-# ==============================================================================
-
-SAMPLE_QUESTIONS = [
+# Benchmark demonstration questions covering all 5 models
+DEMO_SCENARIOS = [
     {
-        "id": "eoq",
-        "title": "1. Economic Order Quantity (EOQ)",
+        "model": "Economic Order Quantity (EOQ)",
         "question": (
-            "Our annual demand is 12,000 units, ordering cost is $50 per order, "
-            "and annual holding cost is $2.00 per unit. We operate 250 working days per year "
-            "and lead time is 5 days. What is our optimal order quantity, how often should we order, "
-            "and what is our reorder point?"
+            "We sell 12,000 units of an industrial valve annually. "
+            "Our cost to place an order is $100, and our annual holding cost is $5.00 per unit. "
+            "Our operating year has 250 days, and vendor lead time is 6 days. "
+            "What is our optimal order size and reorder point?"
         ),
-        "description": "Determines optimal batch size balancing annual setup and inventory holding costs."
+        "notes": "Classic deterministic continuous-review lot sizing."
     },
     {
-        "id": "discount",
-        "title": "2. Quantity Discount Model",
+        "model": "Quantity Discount Model",
         "question": (
-            "We have annual demand of 10,000 units and ordering cost is $100 per order. "
-            "Our supplier offers a volume discount schedule with holding cost rate of 20%: "
-            "0-999 units at $10.00, 1000-1999 units at $9.80, and 2000+ units at $9.50. "
-            "What quantity discount tier should we choose to minimize total annual cost?"
+            "Our annual demand is 10,000 components and ordering cost is $80. "
+            "Our annual inventory holding rate is 20% of purchase price. "
+            "The supplier offers this price break schedule: "
+            "0-499 units: $25.00, 500-999 units: $24.00, 1000+ units: $22.50. "
+            "What quantity should we order to minimize total annual inventory costs?"
         ),
-        "description": "Evaluates all-units price breaks to find optimal order quantity with acquisition costs."
+        "notes": "All-units quantity discount with price-break trade-off."
     },
     {
-        "id": "safety_stock",
-        "title": "3. Safety Stock & Reorder Point",
+        "model": "Safety Stock & Reorder Point (SS & ROP)",
         "question": (
-            "Our daily demand is 100 units with a standard deviation of 20 units. "
-            "Supplier lead time is 4 days. We require a 95% cycle service level. "
-            "What is our recommended safety stock and reorder point?"
+            "Daily demand for our flagship smartphone charger averages 120 units with a standard deviation of 25 units. "
+            "Supplier replenishment lead time averages 9 days. "
+            "Management mandates a 95% cycle service level to protect against stockouts. "
+            "What should our safety stock and reorder point be?"
         ),
-        "description": "Calculates statistical safety buffer and reorder trigger under continuous review."
+        "notes": "Stochastic demand with continuous review (s, Q) policy."
     },
     {
-        "id": "periodic",
-        "title": "4. Fixed-Period Review (Order-Up-To)",
+        "model": "Fixed-Period Review Model (Order-Up-To)",
         "question": (
-            "We operate a periodic review inventory policy and review inventory every 14 days "
-            "with a 7 day supplier lead time. Daily demand is 10 units with a std dev of 3 units. "
-            "Service level is 95%. Current inventory on hand is 50 units and on order is 40 units. "
-            "What is our order-up-to target level and how much should we order today?"
+            "We review inventory for store fixtures every 14 days. "
+            "The supplier takes 7 days to deliver after receiving an order. "
+            "Daily demand averages 30 units with a standard deviation of 8 units. "
+            "We target a 98% cycle service level. "
+            "Currently, we have 180 units on hand and 100 units on order with 0 backorders. "
+            "What is our target order-up-to level S, and how many units should we order today?"
         ),
-        "description": "Determines protection interval buffer and order-up-to replenishment quantity."
+        "notes": "Periodic review (T, S) system protecting over (T + L)."
     },
     {
-        "id": "newsvendor",
-        "title": "5. Newsvendor Model (Single-Period)",
+        "model": "Newsvendor Model",
         "question": (
-            "We sell winter jackets for $100 that cost $40 each. Unsold jackets can be salvaged "
-            "for $10 at the end of the season. Seasonal demand is normally distributed with "
-            "mean 1000 and standard deviation 200. According to the newsvendor model, "
-            "how many jackets should we order and what is our expected profit?"
+            "We are purchasing commemorative holiday gift baskets for a single seasonal event. "
+            "Each basket sells for $90 at retail and costs us $40 to procure. "
+            "Unsold baskets after the holiday can be liquidated to a discounter for a salvage value of $15. "
+            "Event demand is normally distributed with a mean of 1,500 baskets and a standard deviation of 300 baskets. "
+            "How many gift baskets should we purchase to maximize expected profit?"
         ),
-        "description": "Solves critical fractile trade-off between underage and overage for seasonal goods."
+        "notes": "Perishable single-period critical fractile optimization."
     }
 ]
 
 
-# ==============================================================================
-# Terminal CLI Formatting Helpers
-# ==============================================================================
-
-class Colors:
-    HEADER = "\033[95m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
-    END = "\033[0m"
-
-
 def print_banner():
-    banner = f"""
-{Colors.CYAN}{Colors.BOLD}========================================================================================
-     SUPPLY CHAIN ANALYTICS — INVENTORY DECISION AGENT
-     Architecture: Question -> Identify -> Extract -> Tool -> Calculate -> Verify -> Explain
-========================================================================================{Colors.END}
-"""
+    banner = """
+================================================================================
+   SUPPLY CHAIN ANALYTICS: INVENTORY DECISION AGENT
+   Architecture: Question -> Identify -> Extract -> Tool -> Calculate -> Verify -> Explain
+================================================================================
+    """
     print(banner)
 
 
-def print_step_trace(step_num: int, title: str, summary: str, details: Optional[Dict[str, Any]] = None):
-    print(f"{Colors.BLUE}{Colors.BOLD}[Step {step_num}] {title.upper()}{Colors.END}")
-    print(f"  {Colors.GREEN}-> {summary}{Colors.END}")
-    if details:
-        for k, v in details.items():
-            if k not in ["outputs_repr", "explanation_length"]:
-                print(f"     * {k}: {v}")
-    print()
+def display_agent_response(response, verbose: bool = True):
+    """Format and print agent response to terminal."""
+    print("\n" + "=" * 80)
+    print(f"🎯 1. MODEL IDENTIFIED: {response.model_type.value}")
+    print(f"   Confidence Score: {response.confidence:.1%}")
+    print(f"   Selected Tool:    {response.tool_name}")
+    print("=" * 80)
+
+    if not response.success:
+        print(f"\n❌ ERROR: {response.error_message}")
+        print(f"\nExplanation / Missing Details:\n{response.detailed_explanation}")
+        return
+
+    print(f"\n📢 EXECUTIVE DECISION:")
+    print(f"   {response.executive_summary}\n")
+
+    if verbose:
+        print("-" * 80)
+        print("🔍 2. EXTRACTED INPUT PARAMETERS:")
+        for k, v in response.cleaned_inputs.items():
+            if k == "discount_schedule":
+                print(f"   - {k}: {len(v)} pricing tiers parsed")
+                for t in v:
+                    max_s = f"{t['max_qty']:,.0f}" if t.get('max_qty') is not None else "∞"
+                    print(f"       * Tier range [{t['min_qty']:,.0f} - {max_s}]: ${t['price']:,.2f}/unit")
+            elif v is not None:
+                print(f"   - {k}: {v}")
+
+        print("\n🧮 3. NUMERICAL CALCULATION RESULTS:")
+        for k, v in response.calculation_results.items():
+            if k != "evaluated_tiers":
+                print(f"   - {k}: {v}")
+
+        print("\n✅ 4. VERIFICATION AUDIT & SANITY CHECKS:")
+        for v in response.verifications:
+            icon = "✅" if v.status == "PASS" else ("⚠️" if v.status == "WARN" else ("❌" if v.status == "FAIL" else "ℹ️"))
+            print(f"   [{icon} {v.status}] {v.name}: {v.detail}")
+
+        print("\n" + "-" * 80)
+        print("📄 5. DETAILED ANALYTICAL REPORT:")
+        print(response.detailed_explanation)
+
+    print("=" * 80 + "\n")
 
 
-def display_cli_result(result: AgentDecisionResult):
+def run_demo(agent: InventoryAgent):
+    """Execute all pre-configured benchmark scenarios."""
+    print("\n🚀 Running Supply Chain Inventory Agent Benchmark Scenarios...")
+    for i, scenario in enumerate(DEMO_SCENARIOS, 1):
+        print(f"\n{'#' * 80}")
+        print(f"SCENARIO {i}/5: {scenario['model'].upper()}")
+        print(f"Notes: {scenario['notes']}")
+        print(f"Input Question: \"{scenario['question']}\"")
+        print(f"{'#' * 80}")
+
+        response = agent.process_query(scenario["question"])
+        display_agent_response(response, verbose=True)
+
+
+def run_interactive(agent: InventoryAgent):
+    """Run interactive question-answer REPL."""
     print_banner()
-    print(f"{Colors.YELLOW}{Colors.BOLD}CUSTOMER QUESTION:{Colors.END} \"{result.question}\"\n")
-    print(f"{Colors.CYAN}{Colors.BOLD}------------------- 6-STAGE EXECUTION TRACE -------------------{Colors.END}")
-    for trace in result.step_traces:
-        print_step_trace(trace.step_number, trace.step_name, trace.summary, trace.details)
-
-    print(f"{Colors.CYAN}{Colors.BOLD}------------------- DECISION REPORT & EXPLANATION -------------------{Colors.END}")
-    print(result.explanation)
-    print(f"\n{Colors.CYAN}{Colors.BOLD}========================================================================================{Colors.END}\n")
-
-
-# ==============================================================================
-# CLI Interactive Loop & Arguments
-# ==============================================================================
-
-def run_cli_demo():
-    print_banner()
-    print(f"{Colors.BOLD}Executing Automated Benchmark Demonstration across all 5 Inventory Models...{Colors.END}\n")
-    agent = InventoryDecisionAgent()
-    for item in SAMPLE_QUESTIONS:
-        print(f"\n{Colors.YELLOW}{Colors.BOLD}>>> Running Scenario: {item['title']}{Colors.END}")
-        res = agent.run(item["question"])
-        display_cli_result(res)
-        print("-" * 88)
-
-
-def run_cli_interactive():
-    agent = InventoryDecisionAgent()
-    print_banner()
-    print("Welcome to the Supply Chain Analytics Inventory Decision Agent!")
-    print("You can type any natural-language inventory question, or choose a benchmark preset.\n")
+    print("Type your supply chain inventory question below, or use:")
+    print("  'demo'      -> Run all 5 benchmark scenarios")
+    print("  'examples'  -> Show example questions")
+    print("  'help'      -> Show system capabilities")
+    print("  'quit'      -> Exit application\n")
 
     while True:
-        print(f"{Colors.BOLD}Choose an option:{Colors.END}")
-        for i, item in enumerate(SAMPLE_QUESTIONS, 1):
-            print(f"  [{i}] {item['title']}")
-        print("  [6] Enter a custom natural language question")
-        print("  [7] Run all 5 model demo scenarios")
-        print("  [0] Exit")
-
-        choice = input(f"\n{Colors.GREEN}Enter choice [0-7]: {Colors.END}").strip()
-
-        if choice == "0":
-            print("\nExiting Inventory Decision Agent. Goodbye!\n")
+        try:
+            user_input = input("Inventory-Agent> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting. Goodbye!")
             break
-        elif choice in ["1", "2", "3", "4", "5"]:
-            idx = int(choice) - 1
-            sample = SAMPLE_QUESTIONS[idx]
-            print(f"\n{Colors.YELLOW}Selected: {sample['title']}{Colors.END}")
-            print(f"Question: \"{sample['question']}\"\n")
-            res = agent.run(sample["question"])
-            display_cli_result(res)
-        elif choice == "6":
-            custom_q = input(f"\n{Colors.CYAN}Enter your inventory question: {Colors.END}").strip()
-            if custom_q:
-                res = agent.run(custom_q)
-                display_cli_result(res)
-        elif choice == "7":
-            run_cli_demo()
-        else:
-            print(f"{Colors.RED}Invalid option. Please choose between 0 and 7.{Colors.END}\n")
+
+        if not user_input:
+            continue
+
+        cmd = user_input.lower()
+        if cmd in ["quit", "exit", "q"]:
+            print("Exiting Inventory Decision Agent. Goodbye!")
+            break
+        elif cmd in ["demo", "run demo"]:
+            run_demo(agent)
+            continue
+        elif cmd in ["examples", "example"]:
+            print("\n📋 Sample Questions You Can Ask:")
+            for idx, sc in enumerate(DEMO_SCENARIOS, 1):
+                print(f"\n{idx}. [{sc['model']}]:\n   \"{sc['question']}\"")
+            print()
+            continue
+        elif cmd in ["help", "models"]:
+            print("\n🛠️ Supported Inventory Models:")
+            print("  1. Economic Order Quantity (EOQ): Balance setup/ordering vs holding costs")
+            print("  2. Quantity Discount Model: Multi-tier price-break evaluation")
+            print("  3. Safety Stock & Reorder Point (ROP): Lead time & demand stochasticity (s, Q)")
+            print("  4. Fixed-Period Review Model: Periodic review (T, S) order-up-to target")
+            print("  5. Newsvendor Model: Single-period stochastic critical fractile optimization\n")
+            continue
+
+        # Process user question through the 6-stage pipeline
+        response = agent.process_query(user_input)
+        display_agent_response(response, verbose=True)
 
 
-# ==============================================================================
-# Streamlit Web Application
-# ==============================================================================
+def try_run_streamlit(agent: InventoryAgent):
+    """Render a Streamlit web application if run via 'streamlit run app.py'."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return False
 
-def run_streamlit_app():
-    import streamlit as st
+    # Check if streamlit is active in the call stack
+    try:
+        import streamlit.runtime.scriptrunner as scriptrunner
+        is_streamlit = scriptrunner.get_script_run_ctx() is not None
+    except Exception:
+        is_streamlit = False
+
+    if not is_streamlit:
+        return False
 
     st.set_page_config(
         page_title="Supply Chain Inventory Decision Agent",
         page_icon="📦",
-        layout="wide",
-        initial_sidebar_state="expanded"
+        layout="wide"
     )
 
-    st.title("📦 Supply Chain Analytics Inventory Decision Agent")
-    st.markdown("""
-    **Autonomous Decision Intelligence for Supply Chain Operations**  
-    *Architecture:* `Customer Question` ➔ `Identify Model` ➔ `Extract Inputs` ➔ `Select Python Tool` ➔ `Calculate` ➔ `Verify` ➔ `Explain`
-    """)
+    st.title("📦 Supply Chain Analytics: Inventory Decision Agent")
+    st.markdown(
+        "**Architecture:** *Customer Question → Identify Model → Extract Inputs → "
+        "Select Python Tool → Calculate → Verify → Explain*"
+    )
 
-    # Sidebar: Model selector & Presets
+    # Sidebar: Model Selector and Quick Examples
     st.sidebar.header("🎯 Preset Scenarios")
-    preset_choice = st.sidebar.selectbox(
-        "Load a Textbook Benchmark Scenario:",
-        ["None (Custom Question)"] + [s["title"] for s in SAMPLE_QUESTIONS]
+    scenario_choice = st.sidebar.selectbox(
+        "Load an Example Benchmark:",
+        ["Custom Question"] + [f"{i}. {s['model']}" for i, s in enumerate(DEMO_SCENARIOS, 1)]
     )
 
-    selected_sample = None
     default_text = ""
-    if preset_choice != "None (Custom Question)":
-        for s in SAMPLE_QUESTIONS:
-            if s["title"] == preset_choice:
-                selected_sample = s
-                default_text = s["question"]
-                break
+    if scenario_choice != "Custom Question":
+        idx = int(scenario_choice.split(".")[0]) - 1
+        default_text = DEMO_SCENARIOS[idx]["question"]
 
-    # Architecture Overview Expander
-    with st.expander("ℹ️ About the 6-Stage Inventory Decision Architecture"):
-        st.markdown("""
-        1. **Customer Question:** Ingests unconstrained natural-language supply chain queries.
-        2. **Identify Model:** Classifies query into EOQ, Quantity Discount, Safety Stock/ROP, Fixed-Period, or Newsvendor.
-        3. **Extract Inputs:** High-precision parameter extraction for demand rates, setup costs, lead times, service levels, and price breaks.
-        4. **Select Python Tool:** Dynamically binds to pure-Python numerical calculation routines in `inventory_tools.py`.
-        5. **Calculate:** Purely deterministic, mathematically rigorous execution.
-        6. **Verify:** Mathematical sanity verification (cost parity, convexity, non-negativity, inventory conservation).
-        7. **Explain:** Generates executive recommendations, step-by-step math breakdowns, and managerial trade-offs.
-        """)
-
-    # Main Input Area
-    user_question = st.text_area(
+    user_query = st.text_area(
         "Enter your natural-language inventory question:",
         value=default_text,
-        height=130,
-        placeholder="e.g. Our annual demand is 12,000 units, ordering cost is $50, and holding cost is $2/unit/year. What is our optimal order quantity?"
+        height=140,
+        placeholder="e.g. We have annual demand of 15,000 units. Ordering cost is $80 per order, and holding cost is $3.50 per unit/year. What is our EOQ?"
     )
 
     col1, col2 = st.columns([1, 5])
     with col1:
-        calculate_btn = st.button("🚀 Analyze & Decide", type="primary")
+        submit = st.button("🚀 Analyze & Solve", type="primary")
 
-    if calculate_btn and user_question.strip():
-        agent = InventoryDecisionAgent()
-        with st.spinner("Executing 6-stage analytical pipeline..."):
-            result: AgentDecisionResult = agent.run(user_question.strip())
+    if submit and user_query.strip():
+        with st.spinner("Processing through 6-stage analytical pipeline..."):
+            resp = agent.process_query(user_query)
 
-        if not result.success:
-            st.error(f"❌ Analysis Incomplete: {result.error_message}")
-            if result.step_traces:
-                st.subheader("Pipeline Trace")
-                for trace in result.step_traces:
-                    st.write(f"**Step {trace.step_number}: {trace.step_name}** - {trace.summary}")
-            return
+        if not resp.success:
+            st.error(f"❌ Analysis Failed: {resp.error_message}")
+            st.markdown(resp.detailed_explanation)
+        else:
+            # Display Executive Summary
+            st.success(f"**Identified Model:** {resp.model_type.value} (Confidence: {resp.confidence:.0%})")
+            st.info(f"💡 {resp.executive_summary}")
 
-        # Top Metric Cards
-        st.success(f"✅ Identified Model: **{result.model_type.value}** (Tool: `{result.selected_tool_name}`)")
+            # Top KPI metrics
+            st.subheader("Key Inventory Decision Metrics")
+            kpi_cols = st.columns(4)
 
-        kpi_cols = st.columns(4)
-        if result.model_type == InventoryModelType.EOQ:
-            kpi_cols[0].metric("Optimal Order (Q*)", f"{result.raw_outputs.optimal_order_quantity:,.1f} units")
-            kpi_cols[1].metric("Annual Orders", f"{result.raw_outputs.annual_orders_count:.1f} / year")
-            kpi_cols[2].metric("Total Relevant Cost", f"${result.raw_outputs.total_relevant_cost:,.2f}")
-            kpi_cols[3].metric("Order Cycle", f"{result.raw_outputs.order_cycle_days:.1f} days")
-        elif result.model_type == InventoryModelType.QUANTITY_DISCOUNT:
-            kpi_cols[0].metric("Recommended Tier", result.raw_outputs.optimal_tier_label)
-            kpi_cols[1].metric("Optimal Batch", f"{result.raw_outputs.optimal_order_quantity:,.0f} units")
-            kpi_cols[2].metric("Unit Price", f"${result.raw_outputs.optimal_unit_price:,.2f}")
-            kpi_cols[3].metric("Annual Savings", f"${result.raw_outputs.annual_cost_savings:,.2f}", f"{result.raw_outputs.percentage_savings:.1f}%")
-        elif result.model_type == InventoryModelType.SAFETY_STOCK_ROP:
-            kpi_cols[0].metric("Safety Stock (SS)", f"{result.raw_outputs.safety_stock:,.1f} units")
-            kpi_cols[1].metric("Reorder Point (ROP)", f"{result.raw_outputs.reorder_point:,.1f} units")
-            kpi_cols[2].metric("Service Level", f"{result.raw_outputs.service_level*100:.1f}%")
-            kpi_cols[3].metric("Z-Score", f"{result.raw_outputs.z_score:.2f}")
-        elif result.model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
-            kpi_cols[0].metric("Order-Up-To Level (M)", f"{result.raw_outputs.target_inventory_level:,.1f} units")
-            kpi_cols[1].metric("Safety Stock", f"{result.raw_outputs.safety_stock:,.1f} units")
-            kpi_cols[2].metric("Protection Interval", f"{result.raw_outputs.protection_interval:.0f} periods")
-            if result.raw_outputs.recommended_order_quantity is not None:
-                kpi_cols[3].metric("Order Today", f"{result.raw_outputs.recommended_order_quantity:,.1f} units")
-        elif result.model_type == InventoryModelType.NEWSVENDOR:
-            kpi_cols[0].metric("Optimal Order (Q*)", f"{result.raw_outputs.optimal_order_quantity:,.0f} units")
-            kpi_cols[1].metric("Critical Ratio", f"{result.raw_outputs.critical_ratio*100:.2f}%")
-            kpi_cols[2].metric("Expected Profit", f"${result.raw_outputs.expected_profit:,.2f}")
-            kpi_cols[3].metric("EVPI", f"${result.raw_outputs.evpi:,.2f}")
-
-        # Tabs for Decision Report & Technical Pipeline Trace
-        tab_report, tab_trace, tab_verify = st.tabs(["📊 Decision Report & Explanation", "🔍 6-Stage Pipeline Trace", "✅ Verification Report"])
-
-        with tab_report:
-            st.markdown(result.explanation)
-
-        with tab_trace:
-            st.subheader("Step-by-Step Architecture Trace")
-            for t in result.step_traces:
-                with st.expander(f"Step {t.step_number}: {t.step_name} — {t.summary}", expanded=(t.step_number <= 3)):
-                    st.json(t.details)
-
-        with tab_verify:
-            st.subheader("Mathematical Constraints & Quality Verification")
-            for c in result.verification_report.get("checks", []):
-                if c["passed"]:
-                    st.success(f"**PASS:** {c['check']} — *{c['detail']}*")
+            calc = resp.calculation_results
+            if resp.model_type == InventoryModelType.EOQ:
+                kpi_cols[0].metric("Optimal Order Size (Q*)", f"{calc['eoq']:,.0f} units")
+                kpi_cols[1].metric("Orders Per Year", f"{calc['orders_per_year']:.1f}")
+                kpi_cols[2].metric("Total Inventory Cost", f"${calc['total_inventory_cost']:,.2f}")
+                if calc.get("reorder_point") is not None:
+                    kpi_cols[3].metric("Reorder Point (ROP)", f"{calc['reorder_point']:,.0f} units")
                 else:
-                    st.error(f"**FAIL:** {c['check']} — *{c['detail']}*")
+                    kpi_cols[3].metric("Cycle Time", f"{calc['cycle_time_days']:.1f} days")
 
+            elif resp.model_type == InventoryModelType.QUANTITY_DISCOUNT:
+                kpi_cols[0].metric("Optimal Order Qty", f"{calc['optimal_order_quantity']:,.0f} units")
+                kpi_cols[1].metric("Selected Tier", f"Tier {calc['optimal_tier']} (${calc['optimal_unit_price']:,.2f})")
+                kpi_cols[2].metric("Total Annual Cost", f"${calc['optimal_total_cost']:,.2f}")
+                kpi_cols[3].metric("Annual Savings", f"${calc['annual_savings_vs_base']:,.2f} ({calc['percentage_savings']:.1f}%)")
 
-# ==============================================================================
-# Main Entry Point
-# ==============================================================================
+            elif resp.model_type == InventoryModelType.SAFETY_STOCK_ROP:
+                kpi_cols[0].metric("Safety Stock (SS)", f"{calc['safety_stock']:,.0f} units")
+                kpi_cols[1].metric("Reorder Point (ROP)", f"{calc['reorder_point']:,.0f} units")
+                kpi_cols[2].metric("Cycle Service Level", f"{calc['service_level']:.1%}")
+                kpi_cols[3].metric("Stockout Risk", f"{calc['stockout_risk']:.1%}")
+
+            elif resp.model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
+                kpi_cols[0].metric("Order-Up-To Level (S)", f"{calc['order_up_to_level_S']:,.0f} units")
+                kpi_cols[1].metric("Order Quantity (Q)", f"{calc['recommended_order_quantity']:,.0f} units")
+                kpi_cols[2].metric("Safety Stock", f"{calc['safety_stock']:,.0f} units")
+                kpi_cols[3].metric("Protection Interval", f"{calc['protection_interval']:.0f} periods")
+
+            elif resp.model_type == InventoryModelType.NEWSVENDOR:
+                kpi_cols[0].metric("Optimal Order Qty (Q*)", f"{calc['optimal_order_quantity']:,.0f} units")
+                kpi_cols[1].metric("Critical Fractile", f"{calc['critical_fractile']:.1%}")
+                kpi_cols[2].metric("Expected Profit", f"${calc['expected_profit']:,.2f}")
+                kpi_cols[3].metric("EVPI", f"${calc['expected_value_of_perfect_information_EVPI']:,.2f}")
+
+            # Tabs for Detailed Breakdown, Quality Verification, and Raw JSON
+            tab1, tab2, tab3 = st.tabs(["📄 Step-by-Step Report", "✅ Verification Audit", "🔍 Raw Model Inputs & Output"])
+
+            with tab1:
+                st.markdown(resp.detailed_explanation)
+
+            with tab2:
+                for v in resp.verifications:
+                    if v.status == "PASS":
+                        st.success(f"**{v.name}**: {v.detail}")
+                    elif v.status == "WARN":
+                        st.warning(f"**{v.name}**: {v.detail}")
+                    else:
+                        st.error(f"**{v.name}**: {v.detail}")
+
+            with tab3:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("Extracted Inputs:")
+                    st.json(resp.cleaned_inputs)
+                with c2:
+                    st.write("Calculation Output:")
+                    st.json(resp.calculation_results)
+
+    return True
+
 
 def main():
-    # Detect if invoked under 'streamlit run'
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        if get_script_run_ctx() is not None:
-            run_streamlit_app()
-            return
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    agent = InventoryAgent()
 
-    # CLI Argument Parsing
+    # Check if executed under Streamlit runner
+    if try_run_streamlit(agent):
+        return
+
     parser = argparse.ArgumentParser(description="Supply Chain Analytics Inventory Decision Agent")
-    parser.add_argument("--question", "-q", type=str, help="Natural language inventory question to process")
-    parser.add_argument("--demo", action="store_true", help="Run benchmark demo across all 5 inventory models")
-    parser.add_argument("--streamlit", action="store_true", help="Launch Streamlit web dashboard")
-
+    parser.add_argument("--question", "-q", type=str, help="Single question to evaluate")
+    parser.add_argument("--demo", action="store_true", help="Run benchmark demonstration scenarios")
+    parser.add_argument("--brief", action="store_true", help="Print brief summary output only")
     args = parser.parse_args()
 
-    if args.streamlit:
-        import subprocess
-        subprocess.run(["streamlit", "run", __file__])
-    elif args.demo:
-        run_cli_demo()
+    if args.demo:
+        print_banner()
+        run_demo(agent)
     elif args.question:
-        agent = InventoryDecisionAgent()
-        res = agent.run(args.question)
-        display_cli_result(res)
+        resp = agent.process_query(args.question)
+        display_agent_response(resp, verbose=not args.brief)
     else:
-        run_cli_interactive()
+        run_interactive(agent)
 
 
 if __name__ == "__main__":
