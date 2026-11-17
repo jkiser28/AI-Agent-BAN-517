@@ -212,6 +212,90 @@ def run_interactive(agent: InventoryAgent):
         display_agent_response(response, verbose=True)
 
 
+def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
+    """
+    Validate and analyze an inventory pandas DataFrame.
+    Required columns: Product, Category, Units, Unit Cost.
+
+    Calculations performed via pandas:
+    1. Total Units
+    2. Average Unit Cost
+    3. Product with highest Units
+    4. Group data by Category and calculate total Units for each Category
+    5. New calculated column: Inventory Value = Units x Unit Cost
+    6. Total Inventory Value across all products
+    """
+    required_cols = ["Product", "Category", "Units", "Unit Cost"]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        return {
+            "is_valid": False,
+            "missing_columns": missing_cols,
+            "required_columns": required_cols,
+            "error_message": f"Missing required column(s): {', '.join(missing_cols)}. Expected: {', '.join(required_cols)}",
+        }
+
+    try:
+        import pandas as pd
+    except ImportError:
+        return {
+            "is_valid": False,
+            "missing_columns": [],
+            "required_columns": required_cols,
+            "error_message": "pandas library is required for data calculations.",
+        }
+
+    # Work on a copy of the uploaded dataframe
+    df_result = df.copy()
+
+    # Safely convert Units and Unit Cost to numeric using pandas
+    df_result["Units"] = pd.to_numeric(df_result["Units"], errors="coerce").fillna(0.0)
+    df_result["Unit Cost"] = pd.to_numeric(df_result["Unit Cost"], errors="coerce").fillna(0.0)
+
+    # 1. Calculate total Units
+    total_units = float(df_result["Units"].sum())
+
+    # 2. Calculate average Unit Cost
+    avg_unit_cost = float(df_result["Unit Cost"].mean()) if len(df_result) > 0 else 0.0
+
+    # 3. Identify the Product with the highest Units
+    if len(df_result) > 0:
+        max_idx = df_result["Units"].idxmax()
+        highest_units_product = str(df_result.loc[max_idx, "Product"])
+        highest_units_count = float(df_result.loc[max_idx, "Units"])
+    else:
+        highest_units_product = "N/A"
+        highest_units_count = 0.0
+
+    # 4. Group data by Category and calculate total Units for each Category
+    category_summary = (
+        df_result.groupby("Category")["Units"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Units": "Total Units"})
+    )
+
+    # 5. Create new calculated column: Inventory Value = Units x Unit Cost
+    df_result["Inventory Value"] = df_result["Units"] * df_result["Unit Cost"]
+
+    # 6. Calculate total Inventory Value across all products
+    total_inventory_value = float(df_result["Inventory Value"].sum())
+
+    return {
+        "is_valid": True,
+        "dataframe": df_result,
+        "num_rows": int(df.shape[0]),
+        "num_cols": int(df.shape[1]),
+        "column_names": list(df.columns),
+        "total_units": total_units,
+        "avg_unit_cost": avg_unit_cost,
+        "product_highest_units": highest_units_product,
+        "highest_units_count": highest_units_count,
+        "category_summary": category_summary,
+        "total_inventory_value": total_inventory_value,
+    }
+
+
 def try_run_streamlit(agent: InventoryAgent):
     """Render a Streamlit web application if run via 'streamlit run app.py'."""
     try:
@@ -246,6 +330,15 @@ def try_run_streamlit(agent: InventoryAgent):
     scenario_choice = st.sidebar.selectbox(
         "Load an Example Benchmark:",
         ["Custom Question"] + [f"{i}. {s['model']}" for i, s in enumerate(DEMO_SCENARIOS, 1)]
+    )
+
+    # DATA UPLOAD: Section called "Data Upload" as the last section in the sidebar, near bottom
+    st.sidebar.markdown("---")
+    st.sidebar.header("Data Upload")
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload CSV File",
+        type=["csv"],
+        help="Upload an inventory CSV file with columns: Product, Category, Units, Unit Cost"
     )
 
     default_text = ""
@@ -337,6 +430,81 @@ def try_run_streamlit(agent: InventoryAgent):
                 with c2:
                     st.write("Calculation Output:")
                     st.json(resp.calculation_results)
+
+    # DATA PROCESSING & ANALYSIS SECTION (When CSV is uploaded)
+    if uploaded_file is not None:
+        st.markdown("---")
+        st.header("📊 Inventory Data Analysis")
+
+        try:
+            import pandas as pd
+        except ImportError:
+            st.error("❌ 'pandas' library is required to process CSV files. Please install it with `pip install pandas`.")
+            return True
+
+        try:
+            # 1. Read CSV file into a pandas dataframe
+            df_uploaded = pd.read_csv(uploaded_file)
+        except Exception as e:
+            st.error(f"❌ Error reading CSV file: {e}")
+            return True
+
+        # Run pandas data analysis
+        analysis = analyze_inventory_dataframe(df_uploaded)
+
+        if not analysis["is_valid"]:
+            # 3. If required columns missing, display clear message identifying missing columns
+            st.error(
+                f"❌ Invalid CSV File: Missing required column(s): **{', '.join(analysis['missing_columns'])}**.\n\n"
+                f"Required columns are: **{', '.join(analysis['required_columns'])}**."
+            )
+            st.info(f"Columns found in uploaded CSV: `{', '.join(list(df_uploaded.columns))}`")
+        else:
+            # 5. Display: number of rows, number of columns, column names
+            st.subheader("📋 Dataset Overview")
+            meta_col1, meta_col2, meta_col3 = st.columns(3)
+            meta_col1.metric("Number of Rows", f"{analysis['num_rows']:,}")
+            meta_col2.metric("Number of Columns", f"{analysis['num_cols']:,}")
+            meta_col3.metric("Column Count", f"{len(analysis['column_names']):,}")
+            st.caption(f"**Column Names:** {', '.join(analysis['column_names'])}")
+
+            # 4. Display uploaded dataframe in main Streamlit page
+            with st.expander("🔍 View Raw Uploaded DataFrame", expanded=False):
+                st.dataframe(df_uploaded, use_container_width=True)
+
+            # RESULTS: Display clearly in main Streamlit application
+            st.subheader("📈 Inventory Analysis Results")
+            kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+            kpi_col1.metric("Total Units", f"{analysis['total_units']:,.0f}")
+            kpi_col2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
+            kpi_col3.metric(
+                "Product with Highest Units",
+                analysis["product_highest_units"],
+                help=f"{analysis['highest_units_count']:,.0f} units"
+            )
+            kpi_col4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+
+            # Total Units by Category & Enhanced DataFrame
+            cat_col, val_col = st.columns([1, 2])
+            with cat_col:
+                st.markdown("#### 🏷️ Total Units by Category")
+                st.dataframe(
+                    analysis["category_summary"].style.format({"Total Units": "{:,.0f}"}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with val_col:
+                st.markdown("#### 📦 Product Inventory Value Details")
+                st.caption("Includes calculated column: `Inventory Value = Units × Unit Cost`")
+
+            # The dataframe including the new Inventory Value column with currency formatting
+            df_enhanced = analysis["dataframe"]
+            formatted_df = df_enhanced.copy()
+            formatted_df["Unit Cost"] = formatted_df["Unit Cost"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "")
+            formatted_df["Inventory Value"] = formatted_df["Inventory Value"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "")
+            formatted_df["Units"] = formatted_df["Units"].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+            st.dataframe(formatted_df, use_container_width=True)
 
     return True
 

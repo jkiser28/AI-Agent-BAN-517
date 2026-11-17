@@ -15,3 +15,6 @@ tabulate>=0.9.0
 
 # Optional rich web dashboard interface (run: streamlit run app.py)
 streamlit>=1.25.0
+
+# Data analysis and CSV processing for dataset upload
+pandas>=1.5.0
