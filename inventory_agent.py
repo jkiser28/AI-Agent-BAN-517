@@ -1339,8 +1339,16 @@ class InventoryAgent:
         # 4. Formula with Substituted Values
         # -------------------------------------------------------------------
         lines.append("### 4. 🔢 Formula with Substituted Values")
+        step_by_step = results.get("step_by_step_calculation") or results.get("step_by_step_derivation")
+        if step_by_step and isinstance(step_by_step, list):
+            lines.append("```text")
+            for step in step_by_step:
+                lines.append(step)
+            lines.append("```\n")
+
         formulas_sub = results.get("formula_with_substituted_values", {})
         if formulas_sub:
+            lines.append("**Detailed Substituted Equations:**")
             for k, f_sub in formulas_sub.items():
                 clean_name = k.replace("_", " ").title()
                 lines.append(f"- **{clean_name}:** `{f_sub}`")
@@ -1372,7 +1380,7 @@ class InventoryAgent:
             lines.append("| Calculation Metric | Value | Meaning |")
             lines.append("| :--- | :--- | :--- |")
             for k, v in intermediates.items():
-                if v is not None and k != "evaluated_tiers":
+                if v is not None and k not in ("evaluated_tiers", "step_by_step_calculation", "step_by_step_derivation"):
                     clean_k = k.replace("_", " ").title()
                     lines.append(f"| {clean_k} | `{v}` | Intermediate step result |")
         lines.append("")
@@ -1413,36 +1421,6 @@ class InventoryAgent:
         # -------------------------------------------------------------------
         # Managerial & Supply Chain Insights
         # -------------------------------------------------------------------
-        lines.append("### 💡 Managerial & Supply Chain Insights")
-        if model_type == InventoryModelType.EOQ:
-            lines.append("- **Sensitivity:** The total inventory cost curve is relatively flat around the EOQ. A ±10% shift in batch size increases total cost by less than 1%.")
-            lines.append("- **Operational Packaging:** If units are packed on standard pallets or master cartons, round the batch size to the nearest pack size without significant cost penalty.")
-        elif model_type == InventoryModelType.QUANTITY_DISCOUNT:
-            lines.append(f"- **Working Capital & Holding Risk:** Qualifying for Tier {results['optimal_tier']} requires ordering {results['optimal_order_quantity']:,.0f} units. Ensure warehouse capacity and shelf-life permit larger lot sizes.")
-            lines.append("- **Supplier Negotiation:** If cash flow is tight, consider negotiating scheduled partial deliveries while maintaining the volume discount price.")
-        elif model_type == InventoryModelType.SAFETY_STOCK_ROP:
-            lines.append(f"- **Lead Time Variability:** Lead time volatility often inflates safety stock much faster than demand volatility. Reducing vendor lead time variance by 50% can yield substantial working capital savings.")
-            lines.append(f"- **Service Level Trade-off:** Increasing service level from 95% to 99% increases safety stock by ~42% ($z$ shifts from 1.645 to 2.326).")
-        elif model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
-            lines.append("- **Review Cadence:** Periodic review requires higher safety stock than continuous review because inventory is vulnerable across the full $(T + L)$ protection interval rather than just lead time $L$.")
-            lines.append("- **Consolidated Shipments:** Fixed-period review is ideal when grouping orders for multiple products from the same vendor to share transportation setup costs.")
-        elif model_type == InventoryModelType.NEWSVENDOR:
-            lines.append(f"- **Margin Cushion:** With a high margin ($C_u = \\${results['cost_underage_Cu']:,.2f}$ vs $C_o = \\${results['cost_overage_Co']:,.2f}$), the cost of turning away customers far exceeds salvage loss, justifying generous stocking.")
-            if results.get("expected_value_of_perfect_information_EVPI") is not None:
-                lines.append(f"- **Demand Forecasting:** The EVPI of ${results['expected_value_of_perfect_information_EVPI']:,.2f} represents the maximum dollar amount your firm should pay for advanced market research or demand sensing tools.")
-
-        detailed_explanation = "\n".join(lines)
-        return exec_summary, detailed_explanation
-
-        lines.append("")
-        lines.append("### ✅ Verification & Quality Audit")
-        lines.append("| Verification Check | Status | Details |")
-        lines.append("| :--- | :--- | :--- |")
-        for v in verifications:
-            icon = "✅" if v.status == "PASS" else ("⚠️" if v.status == "WARN" else ("❌" if v.status == "FAIL" else "ℹ️"))
-            lines.append(f"| {v.name} | {icon} {v.status} | {v.detail} |")
-
-        lines.append("")
         lines.append("### 💡 Managerial & Supply Chain Insights")
         if model_type == InventoryModelType.EOQ:
             lines.append("- **Sensitivity:** The total inventory cost curve is relatively flat around the EOQ. A ±10% shift in batch size increases total cost by less than 1%.")

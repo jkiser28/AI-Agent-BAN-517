@@ -64,6 +64,15 @@ class InventoryResult(dict):
             return self["formulas"]
         if item == "formulas" and "formula" in self:
             return self["formula"]
+        if item in ("formula_with_substituted_values", "formulas_substituted"):
+            if "formula_with_substituted_values" in self:
+                return self["formula_with_substituted_values"]
+            if "formulas_substituted" in self:
+                return self["formulas_substituted"]
+        if item in ("step_by_step_calculation", "step_by_step_derivation", "step_by_step"):
+            for k in ("step_by_step_calculation", "step_by_step_derivation", "step_by_step"):
+                if k in self:
+                    return self[k]
         raise AttributeError(f"'InventoryResult' object has no attribute '{item}'")
 
     def __getitem__(self, item: str) -> Any:
@@ -77,6 +86,15 @@ class InventoryResult(dict):
             return super().__getitem__("formulas")
         if item == "formulas" and "formula" in self:
             return super().__getitem__("formula")
+        if item in ("formula_with_substituted_values", "formulas_substituted"):
+            if "formula_with_substituted_values" in self:
+                return super().__getitem__("formula_with_substituted_values")
+            if "formulas_substituted" in self:
+                return super().__getitem__("formulas_substituted")
+        if item in ("step_by_step_calculation", "step_by_step_derivation", "step_by_step"):
+            for k in ("step_by_step_calculation", "step_by_step_derivation", "step_by_step"):
+                if k in self:
+                    return super().__getitem__(k)
         return super().__getitem__(item)
 
     def __setattr__(self, key: str, value: Any) -> None:
@@ -236,7 +254,7 @@ def calculate_eoq(
     # 5. Symbolic Formulas
     formulas = {
         "holding_cost": "H = holding_cost" if holding_source == "explicit_holding_cost" else "H = unit_price * holding_rate",
-        "eoq": "Q* = sqrt((2 * D * S) / H)",
+        "eoq": "Q* = sqrt(2DS/H)",
         "orders_per_year": "N = D / Q*",
         "cycle_time_days": "T_days = (Q* / D) * W",
         "annual_ordering_cost": "AOC = (D / Q*) * S = N * S",
@@ -254,7 +272,7 @@ def calculate_eoq(
     holding_sub = f"H = ${H:.2f}/unit/year" if holding_source == "explicit_holding_cost" else f"H = ${unit_price:.2f} * {rate:.2f} = ${H:.2f}/unit/year"
     formulas_substituted = {
         "holding_cost": holding_sub,
-        "eoq": f"Q* = sqrt((2 * {D:,.2f} * {S:,.2f}) / {H:,.2f}) = sqrt({2.0 * D * S:,.2f} / {H:,.2f}) = sqrt({(2.0 * D * S) / H:,.2f}) = {eoq:,.2f} units",
+        "eoq": f"Q* = sqrt((2 x D x S) / H) = sqrt((2 x {D:,.2f} x {S:,.2f}) / {H:,.2f}) = sqrt({2.0 * D * S:,.2f} / {H:,.2f}) = sqrt({(2.0 * D * S) / H:,.2f}) = {eoq:,.2f} units",
         "orders_per_year": f"N = {D:,.2f} / {eoq:,.2f} = {orders_per_year:,.2f} orders/year",
         "cycle_time_days": f"T_days = ({eoq:,.2f} / {D:,.2f}) * {working_days_per_year} = {cycle_time_days:,.1f} operating days",
         "annual_ordering_cost": f"AOC = ({D:,.2f} / {eoq:,.2f}) * ${S:,.2f} = {orders_per_year:,.2f} * ${S:,.2f} = ${annual_ordering_cost:,.2f}/year",
@@ -267,6 +285,31 @@ def calculate_eoq(
     if lead_time_days is not None:
         formulas_substituted["daily_demand"] = f"d = {D:,.2f} / {working_days_per_year} = {daily_demand:,.2f} units/day"
         formulas_substituted["reorder_point"] = f"ROP = {daily_demand:,.2f} * {lead_time_days} = {reorder_point:,.2f} units"
+
+    # Step-by-Step Numerical Derivation Chain (for student verification)
+    step_by_step_calculation = [
+        f"D = {D:,.2f}",
+        f"S = {S:,.2f}",
+        f"H = {H:,.2f}",
+        "Q* = sqrt(2DS/H)",
+        "Q* = sqrt((2 x D x S) / H)",
+        f"Q* = sqrt((2 x {D:,.2f} x {S:,.2f}) / {H:,.2f})",
+        f"Q* = sqrt({2.0 * D * S:,.2f} / {H:,.2f})",
+        f"Q* = sqrt({(2.0 * D * S) / H:,.2f})",
+        f"Q* = {eoq:,.2f} units.",
+        # Supporting EOQ calculations
+        f"N = D / Q* = {D:,.2f} / {eoq:,.2f} = {orders_per_year:,.2f} orders/year",
+        f"T = (Q* / D) * W = ({eoq:,.2f} / {D:,.2f}) * {working_days_per_year} = {cycle_time_days:,.1f} operating days",
+        f"AOC = (D / Q*) * S = ({D:,.2f} / {eoq:,.2f}) * ${S:,.2f} = ${annual_ordering_cost:,.2f}/year",
+        f"AHC = (Q* / 2) * H = ({eoq:,.2f} / 2) * ${H:,.2f} = ${annual_holding_cost:,.2f}/year",
+        f"TIC = AOC + AHC = ${annual_ordering_cost:,.2f} + ${annual_holding_cost:,.2f} = ${total_inventory_cost:,.2f}/year",
+    ]
+    if unit_price is not None:
+        step_by_step_calculation.append(f"APC = D * C = {D:,.2f} * ${unit_price:,.2f} = ${annual_purchase_cost:,.2f}/year")
+        step_by_step_calculation.append(f"TC = APC + TIC = ${annual_purchase_cost:,.2f} + ${total_inventory_cost:,.2f} = ${total_annual_cost:,.2f}/year")
+    if lead_time_days is not None:
+        step_by_step_calculation.append(f"d = D / W = {D:,.2f} / {working_days_per_year} = {daily_demand:,.2f} units/day")
+        step_by_step_calculation.append(f"ROP = d * L = {daily_demand:,.2f} * {lead_time_days} = {reorder_point:,.2f} units")
 
     # 7. Verification Checks
     verification_checks = []
@@ -353,6 +396,7 @@ def calculate_eoq(
         "cost_parity_difference": round(cost_parity_difference, 4),
         "daily_demand": round(daily_demand, 2) if daily_demand is not None else None,
         "reorder_point": round(reorder_point, 2) if reorder_point is not None else None,
+        "step_by_step_calculation": step_by_step_calculation,
     }
 
     final_answer_dict = {
@@ -373,6 +417,8 @@ def calculate_eoq(
         "formulas": formulas,
         "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
+        "step_by_step_calculation": step_by_step_calculation,
+        "step_by_step_derivation": step_by_step_calculation,
         "final_answer": final_answer_dict,
         "verification_checks": verification_checks,
         "assumptions": assumptions,
@@ -584,7 +630,7 @@ def calculate_quantity_discount(
     # 5. Symbolic Formulas
     formulas = {
         "holding_cost": "H_i = C_i * holding_rate" if rate is not None else "H_i = holding_cost",
-        "unconstrained_eoq": "EOQ_i = sqrt((2 * D * S) / H_i)",
+        "unconstrained_eoq": "EOQ_i = sqrt(2DS/H_i)",
         "candidate_quantity": "Q_i = EOQ_i if min_qty_i <= EOQ_i <= max_qty_i else (min_qty_i if EOQ_i < min_qty_i else max_qty_i)",
         "annual_purchase_cost": "APC_i = D * C_i",
         "annual_ordering_cost": "AOC_i = (D / Q_i) * S",
@@ -613,6 +659,51 @@ def calculate_quantity_discount(
     formulas_substituted["annual_savings"] = (
         f"Savings = ${baseline_total_cost:,.2f} - ${best_eval.total_annual_cost:,.2f} = "
         f"${annual_savings:,.2f} ({pct_savings:.2f}%)"
+    )
+
+    # Step-by-step derivation for student verification
+    step_by_step_calculation = [
+        f"D = {D:,.2f}",
+        f"S = {S:,.2f}",
+        f"Holding Cost = {'h * C_i with h = ' + str(rate) if rate is not None else f'${fixed_h:,.2f}/unit/year'}",
+        "EOQ_i = sqrt(2DS/H_i)",
+        "EOQ_i = sqrt((2 x D x S) / H_i)",
+    ]
+    for e in evaluations:
+        max_str = f"{e.max_qty:,.0f}" if e.max_qty is not None else "∞"
+        feas_str = "feasible in range" if e.is_eoq_feasible else "adjusted to price break floor"
+        step_by_step_calculation.append(
+            f"--- Tier {e.tier_index} (Range: [{e.min_qty:,.0f} - {max_str}], Unit Price: ${e.unit_price:.2f}) ---"
+        )
+        step_by_step_calculation.append(
+            f"H_{e.tier_index} = ${e.holding_cost_per_unit:.2f}/unit/year"
+        )
+        step_by_step_calculation.append(
+            f"EOQ_{e.tier_index} = sqrt((2 x {D:,.2f} x {S:,.2f}) / {e.holding_cost_per_unit:.2f}) = {e.unconstrained_eoq:,.2f} units ({feas_str})"
+        )
+        step_by_step_calculation.append(
+            f"Candidate Q_{e.tier_index} = {e.candidate_qty:,.2f} units"
+        )
+        step_by_step_calculation.append(
+            f"APC_{e.tier_index} = D * C_{e.tier_index} = {D:,.2f} * ${e.unit_price:.2f} = ${e.annual_purchase_cost:,.2f}/year"
+        )
+        step_by_step_calculation.append(
+            f"AOC_{e.tier_index} = (D / Q_{e.tier_index}) * S = ({D:,.2f} / {e.candidate_qty:,.2f}) * ${S:,.2f} = ${e.annual_ordering_cost:,.2f}/year"
+        )
+        step_by_step_calculation.append(
+            f"AHC_{e.tier_index} = (Q_{e.tier_index} / 2) * H_{e.tier_index} = ({e.candidate_qty:,.2f} / 2) * ${e.holding_cost_per_unit:.2f} = ${e.annual_holding_cost:,.2f}/year"
+        )
+        step_by_step_calculation.append(
+            f"TC_{e.tier_index} = APC + AOC + AHC = ${e.annual_purchase_cost:,.2f} + ${e.annual_ordering_cost:,.2f} + ${e.annual_holding_cost:,.2f} = ${e.total_annual_cost:,.2f}/year"
+        )
+    step_by_step_calculation.append(
+        f"TC* = min({', '.join('$' + f'{e.total_annual_cost:,.2f}' for e in evaluations)}) = ${best_eval.total_annual_cost:,.2f}"
+    )
+    step_by_step_calculation.append(
+        f"Optimal Order Quantity Q* = {best_eval.candidate_qty:,.2f} units (Tier {best_eval.tier_index} at ${best_eval.unit_price:.2f}/unit)."
+    )
+    step_by_step_calculation.append(
+        f"Annual Savings vs Baseline = ${annual_savings:,.2f} ({pct_savings:.2f}%)."
     )
 
     # 7. Verification Checks
@@ -702,6 +793,7 @@ def calculate_quantity_discount(
         "baseline_total_annual_cost": round(baseline_total_cost, 2),
         "annual_savings_vs_base": round(annual_savings, 2),
         "percentage_savings": round(pct_savings, 2),
+        "step_by_step_calculation": step_by_step_calculation,
     }
 
     final_answer_dict = {
@@ -722,6 +814,8 @@ def calculate_quantity_discount(
         "formulas": formulas,
         "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
+        "step_by_step_calculation": step_by_step_calculation,
+        "step_by_step_derivation": step_by_step_calculation,
         "final_answer": final_answer_dict,
         "verification_checks": verification_checks,
         "assumptions": assumptions,
@@ -990,6 +1084,54 @@ def calculate_rop(
     if holding_cost_per_unit is not None:
         formulas_substituted["annual_holding_cost_ss"] = f"AHC_SS = {ss:,.2f} * ${holding_cost_per_unit:,.2f} = ${ss_holding_cost:,.2f}/year"
 
+    # Step-by-step derivation for student verification
+    step_by_step_calculation = []
+    if not using_direct_ltd:
+        step_by_step_calculation.append(f"d = {d:,.2f}")
+        step_by_step_calculation.append(f"sigma_d = {d_std:,.2f}")
+        step_by_step_calculation.append(f"L = {L:,.2f}")
+        step_by_step_calculation.append(f"sigma_L = {l_std:,.2f}")
+    else:
+        step_by_step_calculation.append(f"mu_LTD = {mu_ltd:,.2f}")
+        step_by_step_calculation.append(f"sigma_LT = {sigma_lt:,.2f}")
+    step_by_step_calculation.append(f"CSL = {csl:.4f} ({csl:.1%})")
+    step_by_step_calculation.append(f"z = Phi^-1(CSL) = Phi^-1({csl:.4f}) = {z:.4f}")
+
+    if using_direct_ltd:
+        step_by_step_calculation.append("SS = z * sigma_LT")
+        step_by_step_calculation.append(f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units.")
+        step_by_step_calculation.append("ROP = mu_LTD + SS")
+        step_by_step_calculation.append(f"ROP = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units.")
+    elif d_std == 0.0 and l_std == 0.0:
+        step_by_step_calculation.append("sigma_LT = 0 (constant demand & constant lead time)")
+        step_by_step_calculation.append("SS = 0 units.")
+        step_by_step_calculation.append("ROP = d * L")
+        step_by_step_calculation.append(f"ROP = {d:,.2f} * {L:,.2f} = {rop:,.2f} units.")
+    elif d_std > 0.0 and l_std == 0.0:
+        step_by_step_calculation.append("sigma_LT = sigma_d * sqrt(L)")
+        step_by_step_calculation.append(f"sigma_LT = {d_std:,.2f} * sqrt({L:,.2f}) = {sigma_lt:,.2f} units.")
+        step_by_step_calculation.append("SS = z * sigma_LT")
+        step_by_step_calculation.append(f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units.")
+        step_by_step_calculation.append("ROP = d * L + SS")
+        step_by_step_calculation.append(f"ROP = ({d:,.2f} * {L:,.2f}) + {ss:,.2f} = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units.")
+    elif d_std == 0.0 and l_std > 0.0:
+        step_by_step_calculation.append("sigma_LT = d * sigma_L")
+        step_by_step_calculation.append(f"sigma_LT = {d:,.2f} * {l_std:,.2f} = {sigma_lt:,.2f} units.")
+        step_by_step_calculation.append("SS = z * sigma_LT")
+        step_by_step_calculation.append(f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units.")
+        step_by_step_calculation.append("ROP = d * L + SS")
+        step_by_step_calculation.append(f"ROP = ({d:,.2f} * {L:,.2f}) + {ss:,.2f} = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units.")
+    else:
+        var_c1 = L * (d_std ** 2)
+        var_c2 = (d ** 2) * (l_std ** 2)
+        step_by_step_calculation.append("sigma_LT = sqrt(L * sigma_d^2 + d^2 * sigma_L^2)")
+        step_by_step_calculation.append(f"sigma_LT = sqrt(({L:,.2f} x ({d_std:,.2f})^2) + (({d:,.2f})^2 x ({l_std:,.2f})^2))")
+        step_by_step_calculation.append(f"sigma_LT = sqrt({var_c1:,.2f} + {var_c2:,.2f}) = sqrt({var_c1 + var_c2:,.2f}) = {sigma_lt:,.2f} units.")
+        step_by_step_calculation.append("SS = z * sigma_LT")
+        step_by_step_calculation.append(f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units.")
+        step_by_step_calculation.append("ROP = d * L + SS")
+        step_by_step_calculation.append(f"ROP = ({d:,.2f} * {L:,.2f}) + {ss:,.2f} = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units.")
+
     # 7. Verification Checks
     verification_checks = []
     # Check 1: Safety Stock Sign
@@ -1085,6 +1227,7 @@ def calculate_rop(
         "stockout_risk_per_cycle": round(stockout_risk, 4),
         "expected_shortage_per_cycle": round(expected_shortage_per_cycle, 4),
         "annual_holding_cost_ss": round(ss_holding_cost, 2) if ss_holding_cost is not None else None,
+        "step_by_step_calculation": step_by_step_calculation,
     }
 
     final_answer_dict = {
@@ -1105,6 +1248,8 @@ def calculate_rop(
         "formulas": formulas,
         "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
+        "step_by_step_calculation": step_by_step_calculation,
+        "step_by_step_derivation": step_by_step_calculation,
         "final_answer": final_answer_dict,
         "verification_checks": verification_checks,
         "assumptions": assumptions,
@@ -1256,16 +1401,16 @@ def calculate_periodic_review(
 
     # 5. Symbolic Formulas
     formulas = {
-        "protection_period": "Protection Interval = review_period + lead_time = T + L",
+        "protection_period": "Protection period = review period + lead time = T + L",
         "expected_demand_protection": "D_protection = d * (T + L)",
         "std_demand_protection": "sigma_protection = sigma_d * sqrt(T + L)",
         "safety_factor": "z = Phi^-1(CSL)" if service_level is not None else "z = SS / sigma_protection",
         "safety_stock": "SS = z * sigma_protection = z * sigma_d * sqrt(T + L)",
-        "target_inventory": "S = D_protection + SS = (d * (T + L)) + SS",
+        "target_inventory": "Target inventory = demand during protection period + safety stock = (d * (T + L)) + SS",
     }
     if inv_pos is not None:
-        formulas["inventory_position"] = "IP = I_OH + I_OO - BO" if current_on_hand is not None else "IP = inventory_position"
-        formulas["order_quantity"] = "Q = max(0, S - IP)"
+        formulas["inventory_position"] = "IP = On-Hand + On-Order - Backorders" if current_on_hand is not None else "IP = inventory_position"
+        formulas["order_quantity"] = "Order quantity = max(0, target inventory - inventory position) = max(0, S - IP)"
 
     # 6. Formulas with Substituted Values
     z_sub = f"z = Phi^-1({csl:.4f}) = {z:.4f}" if csl is not None else f"z = {calc_ss:.2f} / {std_demand_protection:.2f} = {z:.4f}"
@@ -1283,6 +1428,37 @@ def calculate_periodic_review(
         else:
             formulas_substituted["inventory_position"] = f"IP = {inv_pos:,.2f} units"
         formulas_substituted["order_quantity"] = f"Q = max(0, {target_inventory:,.2f} - {inv_pos:,.2f}) = max(0, {target_inventory - inv_pos:,.2f}) = {order_quantity:,.2f} units"
+
+    # Step-by-step derivation for student verification
+    step_by_step_calculation = [
+        f"T = {P:,.2f} periods",
+        f"L = {L:,.2f} periods",
+        f"d = {d:,.2f} units/period",
+        f"sigma_d = {sigma_d:,.2f} units/period",
+        f"CSL = {csl:.4f} ({csl:.1%})" if csl is not None else f"Safety stock fixed = {calc_ss:,.2f} units",
+        "Protection period = review period + lead time",
+        f"Protection period = T + L = {P:,.2f} + {L:,.2f} = {protection_period:,.2f} periods.",
+        "D_protection = d * (T + L)",
+        f"D_protection = {d:,.2f} * {protection_period:,.2f} = {expected_demand_protection:,.2f} units.",
+        "sigma_protection = sigma_d * sqrt(T + L)",
+        f"sigma_protection = {sigma_d:,.2f} * sqrt({protection_period:,.2f}) = {std_demand_protection:,.2f} units.",
+        f"z = Phi^-1(CSL) = Phi^-1({csl:.4f}) = {z:.4f}" if csl is not None else f"z = {z:.4f}",
+        "SS = z * sigma_protection",
+        f"SS = {z:.4f} * {std_demand_protection:,.2f} = {calc_ss:,.2f} units.",
+        "Target inventory = demand during protection period + safety stock",
+        "S = D_protection + SS",
+        f"S = {expected_demand_protection:,.2f} + {calc_ss:,.2f} = {target_inventory:,.2f} units.",
+    ]
+    if inv_pos is not None:
+        if current_on_hand is not None:
+            step_by_step_calculation.append(
+                f"IP = On-Hand ({float(current_on_hand):,.2f}) + On-Order ({float(current_on_order):,.2f}) - Backorders ({float(backorders):,.2f}) = {inv_pos:,.2f} units."
+            )
+        else:
+            step_by_step_calculation.append(f"IP = {inv_pos:,.2f} units.")
+        step_by_step_calculation.append("Order quantity = max(0, target inventory - inventory position)")
+        step_by_step_calculation.append("Q = max(0, S - IP)")
+        step_by_step_calculation.append(f"Q = max(0, {target_inventory:,.2f} - {inv_pos:,.2f}) = {order_quantity:,.2f} units.")
 
     # 7. Verification Checks
     verification_checks = []
@@ -1376,6 +1552,7 @@ def calculate_periodic_review(
         "target_inventory": round(target_inventory, 2),
         "inventory_position": round(inv_pos, 2) if inv_pos is not None else None,
         "order_quantity": round(order_quantity, 2) if order_quantity is not None else None,
+        "step_by_step_calculation": step_by_step_calculation,
     }
 
     final_answer_dict = {
@@ -1396,6 +1573,8 @@ def calculate_periodic_review(
         "formulas": formulas,
         "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
+        "step_by_step_calculation": step_by_step_calculation,
+        "step_by_step_derivation": step_by_step_calculation,
         "final_answer": final_answer_dict,
         "verification_checks": verification_checks,
         "assumptions": assumptions,
@@ -1618,6 +1797,47 @@ def calculate_newsvendor(
             f"${pi_profit:,.2f} - ${exp_profit:,.2f} = ${evpi:,.2f}"
         )
 
+    # Step-by-step derivation for student verification
+    step_by_step_calculation = []
+    if not has_direct_cu_co:
+        step_by_step_calculation.extend([
+            f"p = ${p:,.2f}",
+            f"c = ${c:,.2f}",
+            f"s = ${s:,.2f}",
+            f"g = ${g:,.2f}",
+            f"mu = {mu:,.2f} units",
+            f"sigma = {sigma:,.2f} units",
+            "Cu = p - c + g",
+            f"Cu = ${p:,.2f} - ${c:,.2f} + ${g:,.2f} = ${cu:,.2f}/unit.",
+            "Co = c - s",
+            f"Co = ${c:,.2f} - ${s:,.2f} = ${co:,.2f}/unit.",
+        ])
+    else:
+        step_by_step_calculation.extend([
+            f"Cu = ${cu:,.2f}/unit",
+            f"Co = ${co:,.2f}/unit",
+            f"mu = {mu:,.2f} units",
+            f"sigma = {sigma:,.2f} units",
+        ])
+    step_by_step_calculation.extend([
+        "CR = Cu / (Cu + Co)",
+        f"CR = ${cu:,.2f} / (${cu:,.2f} + ${co:,.2f}) = ${cu:,.2f} / ${cu + co:,.2f} = {cr:.4f} ({cr:.2%}).",
+        f"z* = Phi^-1(CR) = Phi^-1({cr:.4f}) = {effective_z:.4f}",
+        "Q* = mu + z* * sigma",
+        f"Q* = {mu:,.2f} + ({effective_z:.4f} * {sigma:,.2f}) = {mu:,.2f} + {effective_z * sigma:,.2f} = {q_star:,.2f} units.",
+        f"E[Lost Sales] = sigma * L(z*) = {sigma:,.2f} * L({effective_z:.4f}) = {exp_lost_sales:,.2f} units.",
+        f"E[Leftover] = Q* - mu + E[Lost Sales] = {q_star:,.2f} - {mu:,.2f} + {exp_lost_sales:,.2f} = {exp_leftover:,.2f} units.",
+        f"E[Sales] = mu - E[Lost Sales] = {mu:,.2f} - {exp_lost_sales:,.2f} = {exp_sales:,.2f} units.",
+        f"P(Demand <= Q*) = Phi({effective_z:.4f}) = {in_stock_prob:.4f} ({in_stock_prob:.2%}).",
+    ])
+    if p is not None and c is not None:
+        step_by_step_calculation.append(
+            f"E[Profit] = (p * E[Sales]) + (s * E[Leftover]) - (c * Q*) - (g * E[Lost Sales]) = ${exp_profit:,.2f}."
+        )
+        step_by_step_calculation.append(
+            f"EVPI = ((p - c) * mu) - E[Profit] = ${evpi:,.2f}."
+        )
+
     # 7. Verification Checks
     verification_checks = []
     # Check 1: Economic viability
@@ -1719,6 +1939,7 @@ def calculate_newsvendor(
         "expected_profit_perfect_information": round(pi_profit, 2) if pi_profit is not None else None,
         "expected_value_of_perfect_information_EVPI": round(evpi, 2) if evpi is not None else None,
         "in_stock_probability": round(in_stock_prob, 4),
+        "step_by_step_calculation": step_by_step_calculation,
     }
 
     final_answer_dict = {
@@ -1739,6 +1960,8 @@ def calculate_newsvendor(
         "formulas": formulas,
         "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
+        "step_by_step_calculation": step_by_step_calculation,
+        "step_by_step_derivation": step_by_step_calculation,
         "final_answer": final_answer_dict,
         "verification_checks": verification_checks,
         "assumptions": assumptions,

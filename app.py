@@ -124,15 +124,21 @@ def display_agent_response(response, verbose: bool = True):
             elif v is not None:
                 print(f"   - {k}: {v}")
 
-        print("\n🧮 3. NUMERICAL CALCULATION RESULTS:")
-        excluded_keys = {
-            "evaluated_tiers", "inputs_extracted", "inputs", "variable_definitions",
-            "formula", "formulas", "formula_with_substituted_values",
-            "intermediate_calculations", "final_answer", "verification_checks", "assumptions", "tool"
-        }
-        for k, v in response.calculation_results.items():
-            if k not in excluded_keys and not isinstance(v, (dict, list)):
-                print(f"   - {k}: {v}")
+        print("\n🧮 3. NUMERICAL CALCULATION RESULTS & STEP-BY-STEP DERIVATION:")
+        step_by_step = response.calculation_results.get("step_by_step_calculation")
+        if step_by_step and isinstance(step_by_step, list):
+            for step in step_by_step:
+                print(f"   {step}")
+        else:
+            excluded_keys = {
+                "evaluated_tiers", "inputs_extracted", "inputs", "variable_definitions",
+                "formula", "formulas", "formula_with_substituted_values",
+                "intermediate_calculations", "final_answer", "verification_checks", "assumptions", "tool",
+                "step_by_step_calculation", "step_by_step_derivation"
+            }
+            for k, v in response.calculation_results.items():
+                if k not in excluded_keys and not isinstance(v, (dict, list)):
+                    print(f"   - {k}: {v}")
 
         print("\n✅ 4. VERIFICATION AUDIT & SANITY CHECKS:")
         for v in response.verifications:
