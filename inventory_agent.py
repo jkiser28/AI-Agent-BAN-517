@@ -793,7 +793,8 @@ class InventoryAgent:
                 r"wholesale\s+cost", r"procurement\s+cost", r"cost\s+per\s+unit",
                 r"unit\s+cost", r"bought\s+for", r"buys\s+for", r"costs?\s+us",
                 r"costs?\s+[\$]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s+to\s+(?:purchase|buy|produce|procure)",
-                r"cost\s+to\s+(?:purchase|buy|produce|procure)", r"cost\s+is", r"cost\s+of"
+                r"cost\s+to\s+(?:purchase|buy|produce|procure)", r"cost\s+is", r"cost\s+of",
+                r"costs?"
             ]
             for pat in c_patterns:
                 if "(" in pat:
@@ -1072,8 +1073,18 @@ class InventoryAgent:
     ) -> List[VerificationCheck]:
         """
         Perform rigorous domain-specific sanity and economic verification checks.
+        Extracts deterministic checks directly from the calculation tool result.
         """
         checks: List[VerificationCheck] = []
+        raw_checks = results.get("verification_checks")
+        if raw_checks and isinstance(raw_checks, list):
+            for c in raw_checks:
+                name = c.get("name") or c.get("check", "Verification Check")
+                status = c.get("status", "PASS")
+                detail = c.get("detail", "")
+                checks.append(VerificationCheck(name=name, status=status, detail=detail))
+            if checks:
+                return checks
 
         if model_type == InventoryModelType.EOQ:
             eoq = results["eoq"]
@@ -1214,7 +1225,17 @@ class InventoryAgent:
         verifications: List[VerificationCheck]
     ) -> Tuple[str, str]:
         """
-        Generate executive-level direct recommendations and full mathematical explanations.
+        Generate executive-level direct recommendations and full mathematical explanations
+        structured explicitly around the 8 student verification sections:
+        1. Inputs Extracted
+        2. Variable Definitions
+        3. Formula
+        4. Formula with Substituted Values
+        5. Intermediate Calculations
+        6. Final Answer
+        7. Verification Checks
+        8. Assumptions
+        All numerical values and substitutions come directly from the deterministic tool results.
         """
         # Build executive summary
         if model_type == InventoryModelType.EOQ:
@@ -1262,7 +1283,7 @@ class InventoryAgent:
         else:
             exec_summary = "Model could not be determined."
 
-        # Build detailed step-by-step markdown report
+        # Build detailed step-by-step markdown report with all 8 mandated student verification sections
         lines: List[str] = []
         lines.append(f"## 📦 Supply Chain Decision Analysis")
         lines.append(f"**Identified Model:** `{model_type.value}`\n")
@@ -1270,38 +1291,73 @@ class InventoryAgent:
         lines.append("### 🎯 Executive Recommendation")
         lines.append(exec_summary + "\n")
 
-        lines.append("### 📋 Extracted Input Parameters")
-        lines.append("| Parameter | Value | Description |")
+        # -------------------------------------------------------------------
+        # 1. Inputs Extracted
+        # -------------------------------------------------------------------
+        lines.append("### 1. 📋 Inputs Extracted")
+        lines.append("| Parameter | Value | Source / Meaning |")
         lines.append("| :--- | :--- | :--- |")
-        for k, v in inputs.items():
-            if k == "discount_schedule":
-                lines.append(f"| `discount_schedule` | {len(v)} tiers | Tiered pricing schedule |")
+        extracted_inputs = results.get("inputs_extracted") or results.get("inputs") or inputs
+        for k, v in extracted_inputs.items():
+            if k == "discount_schedule" and isinstance(v, list):
+                lines.append(f"| `discount_schedule` | {len(v)} tiers | Tiered quantity break schedule |")
+                for idx, t in enumerate(v, 1):
+                    max_s = f"{t['max_qty']:,.0f}" if t.get('max_qty') is not None else "∞"
+                    lines.append(f"| &nbsp;&nbsp;↳ Tier {idx} | Range [{t['min_qty']:,.0f} - {max_s}] | Price: ${t['price']:,.2f}/unit |")
             elif v is not None:
-                lines.append(f"| `{k}` | `{v}` | Extracted from query |")
+                lines.append(f"| `{k}` | `{v}` | Validated numerical input |")
         lines.append("")
 
-        lines.append("### 🧮 Mathematical Formulation & Steps")
-        if model_type == InventoryModelType.EOQ:
-            h = results["holding_cost_per_unit"]
-            d = results["annual_demand"]
-            s = results["order_cost"]
-            lines.append(f"1. **Annual Holding Cost per unit (H):** `${h:,.2f}` per unit per year.")
-            lines.append(f"2. **EOQ Formula:** $Q^* = \\sqrt{{\\frac{{2DS}}{{H}}}} = \\sqrt{{\\frac{{2 \\times {d:,.0f} \\times {s:,.2f}}}{{{h:,.2f}}}}} = {results['eoq']:,.2f}$ units.")
-            lines.append(f"3. **Order Frequency:** $N = \\frac{{D}}{{Q^*}} = \\frac{{{d:,.0f}}}{{{results['eoq']:,.2f}}} = {results['orders_per_year']:.2f}$ orders/year.")
-            lines.append(f"4. **Cycle Length:** $T = \\frac{{Q^*}}{{D}} \\times W = \\frac{{{results['eoq']:,.2f}}}{{{d:,.0f}}} \\times {results['working_days']} = {results['cycle_time_days']:.1f}$ operating days.")
-            lines.append(f"5. **Annual Ordering Cost (AOC):** $N \\times S = {results['orders_per_year']:.2f} \\times \\${s:,.2f} = \\${results['annual_ordering_cost']:,.2f}$.")
-            lines.append(f"6. **Annual Holding Cost (AHC):** \\frac{{Q^*}}{{2}} \\times H = \\frac{{{results['eoq']:,.2f}}}{{2}} \\times \\${h:,.2f} = \\${results['annual_holding_cost']:,.2f}$.")
-            lines.append(f"7. **Total Inventory Cost (TIC):** $AOC + AHC = \\${results['total_inventory_cost']:,.2f}$.")
-            if results.get("total_annual_cost") is not None:
-                lines.append(f"8. **Total Annual Cost (TC):** $D \\times C + TIC = \\${results['total_annual_cost']:,.2f}$.")
-            if results.get("reorder_point") is not None:
-                lines.append(f"9. **Reorder Point (ROP):** $d \\times L = \\left(\\frac{{{d:,.0f}}}{{{results['working_days']}}}\\right) \\times {results['lead_time_days']} = {results['reorder_point']:,.1f}$ units.")
+        # -------------------------------------------------------------------
+        # 2. Variable Definitions
+        # -------------------------------------------------------------------
+        lines.append("### 2. 📖 Variable Definitions")
+        var_defs = results.get("variable_definitions", {})
+        if var_defs:
+            lines.append("| Variable Symbol | Definition & Measurement Unit |")
+            lines.append("| :--- | :--- |")
+            for sym, defn in var_defs.items():
+                lines.append(f"| **`{sym}`** | {defn} |")
+        else:
+            lines.append("*Standard inventory textbook notation applies.*")
+        lines.append("")
 
-        elif model_type == InventoryModelType.QUANTITY_DISCOUNT:
+        # -------------------------------------------------------------------
+        # 3. Formula
+        # -------------------------------------------------------------------
+        lines.append("### 3. 📐 Formula")
+        formulas = results.get("formula") or results.get("formulas", {})
+        if formulas:
+            for k, f_str in formulas.items():
+                clean_name = k.replace("_", " ").title()
+                lines.append(f"- **{clean_name}:** `{f_str}`")
+        else:
+            lines.append("*Refer to standard formula specification.*")
+        lines.append("")
+
+        # -------------------------------------------------------------------
+        # 4. Formula with Substituted Values
+        # -------------------------------------------------------------------
+        lines.append("### 4. 🔢 Formula with Substituted Values")
+        formulas_sub = results.get("formula_with_substituted_values", {})
+        if formulas_sub:
+            for k, f_sub in formulas_sub.items():
+                clean_name = k.replace("_", " ").title()
+                lines.append(f"- **{clean_name}:** `{f_sub}`")
+        else:
+            lines.append("*See intermediate calculations below.*")
+        lines.append("")
+
+        # -------------------------------------------------------------------
+        # 5. Intermediate Calculations
+        # -------------------------------------------------------------------
+        lines.append("### 5. 🧮 Intermediate Calculations")
+        intermediates = results.get("intermediate_calculations", {})
+        if model_type == InventoryModelType.QUANTITY_DISCOUNT and "evaluated_tiers" in intermediates:
             lines.append("Evaluated all discount tiers for feasibility and total annual cost:")
             lines.append("| Tier | Range | Price | Unconstrained EOQ | Candidate Q | Purchase Cost | Ordering Cost | Holding Cost | Total Annual Cost | Status |")
             lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-            for t in results["evaluated_tiers"]:
+            for t in intermediates["evaluated_tiers"]:
                 max_str = f"{t['max_qty']:,.0f}" if t['max_qty'] is not None else "∞"
                 status = "⭐ **OPTIMAL**" if t['is_optimal'] else ("Feasible" if t['is_eoq_feasible'] else "Price-Break Adjust")
                 lines.append(
@@ -1310,47 +1366,73 @@ class InventoryAgent:
                     f"${t['annual_purchase_cost']:,.2f} | ${t['annual_ordering_cost']:,.2f} | "
                     f"${t['annual_holding_cost']:,.2f} | **${t['total_annual_cost']:,.2f}** | {status} |"
                 )
+            lines.append(f"\n- **Baseline Cost (Tier 1 unconstrained EOQ):** ${intermediates.get('baseline_total_annual_cost', 0):,.2f}")
+            lines.append(f"- **Annual Savings vs Baseline:** ${intermediates.get('annual_savings_vs_base', 0):,.2f} ({intermediates.get('percentage_savings', 0):.1f}%)")
+        else:
+            lines.append("| Calculation Metric | Value | Meaning |")
+            lines.append("| :--- | :--- | :--- |")
+            for k, v in intermediates.items():
+                if v is not None and k != "evaluated_tiers":
+                    clean_k = k.replace("_", " ").title()
+                    lines.append(f"| {clean_k} | `{v}` | Intermediate step result |")
+        lines.append("")
 
+        # -------------------------------------------------------------------
+        # 6. Final Answer
+        # -------------------------------------------------------------------
+        lines.append("### 6. 🎯 Final Answer")
+        final_ans = results.get("final_answer", {})
+        lines.append("| Decision Metric | Recommended Value |")
+        lines.append("| :--- | :--- |")
+        for k, v in final_ans.items():
+            if v is not None:
+                clean_k = k.replace("_", " ").title()
+                lines.append(f"| **{clean_k}** | **`{v}`** |")
+        lines.append("")
+
+        # -------------------------------------------------------------------
+        # 7. Verification Checks
+        # -------------------------------------------------------------------
+        lines.append("### 7. ✅ Verification Checks")
+        lines.append("| Verification Check | Status | Details |")
+        lines.append("| :--- | :--- | :--- |")
+        for v in verifications:
+            icon = "✅" if v.status == "PASS" else ("⚠️" if v.status == "WARN" else ("❌" if v.status == "FAIL" else "ℹ️"))
+            lines.append(f"| {v.name} | {icon} {v.status} | {v.detail} |")
+        lines.append("")
+
+        # -------------------------------------------------------------------
+        # 8. Assumptions
+        # -------------------------------------------------------------------
+        lines.append("### 8. 📝 Assumptions")
+        assumptions = results.get("assumptions", [])
+        for idx, a in enumerate(assumptions, 1):
+            lines.append(f"{idx}. {a}")
+        lines.append("")
+
+        # -------------------------------------------------------------------
+        # Managerial & Supply Chain Insights
+        # -------------------------------------------------------------------
+        lines.append("### 💡 Managerial & Supply Chain Insights")
+        if model_type == InventoryModelType.EOQ:
+            lines.append("- **Sensitivity:** The total inventory cost curve is relatively flat around the EOQ. A ±10% shift in batch size increases total cost by less than 1%.")
+            lines.append("- **Operational Packaging:** If units are packed on standard pallets or master cartons, round the batch size to the nearest pack size without significant cost penalty.")
+        elif model_type == InventoryModelType.QUANTITY_DISCOUNT:
+            lines.append(f"- **Working Capital & Holding Risk:** Qualifying for Tier {results['optimal_tier']} requires ordering {results['optimal_order_quantity']:,.0f} units. Ensure warehouse capacity and shelf-life permit larger lot sizes.")
+            lines.append("- **Supplier Negotiation:** If cash flow is tight, consider negotiating scheduled partial deliveries while maintaining the volume discount price.")
         elif model_type == InventoryModelType.SAFETY_STOCK_ROP:
-            lines.append(f"1. **Lead Time Model:** {results['lead_time_type']}")
-            lines.append(f"2. **Target Service Level:** CSL = {results['service_level']:.1%} $\\implies z = \\Phi^{{-1}}({results['service_level']:.4f}) = {results['z_score']:.4f}$.")
-            lines.append(f"3. **Lead Time Demand Mean ($\\mu_{{LTD}}$):** {results['lead_time_demand_mean']:,.2f} units.")
-            lines.append(f"4. **Lead Time Demand Std Dev ($\\sigma_{{LTD}}$):** {results['lead_time_demand_std']:,.2f} units.")
-            lines.append(f"5. **Safety Stock (SS):** $z \\times \\sigma_{{LTD}} = {results['z_score']:.4f} \\times {results['lead_time_demand_std']:,.2f} = \\mathbf{{{results['safety_stock']:,.2f}}}$ units.")
-            lines.append(f"6. **Reorder Point (ROP):** $\\mu_{{LTD}} + SS = {results['lead_time_demand_mean']:,.2f} + {results['safety_stock']:,.2f} = \\mathbf{{{results['reorder_point']:,.2f}}}$ units.")
-            if results.get("annual_holding_cost_ss") is not None:
-                lines.append(f"7. **Safety Stock Annual Holding Cost:** $SS \\times H = \\${results['annual_holding_cost_ss']:,.2f}/year.")
-
+            lines.append(f"- **Lead Time Variability:** Lead time volatility often inflates safety stock much faster than demand volatility. Reducing vendor lead time variance by 50% can yield substantial working capital savings.")
+            lines.append(f"- **Service Level Trade-off:** Increasing service level from 95% to 99% increases safety stock by ~42% ($z$ shifts from 1.645 to 2.326).")
         elif model_type == InventoryModelType.FIXED_PERIOD_REVIEW:
-            lines.append(f"1. **Protection Interval:** $T + L = {results['review_period_T']} + {results['lead_time_L']} = {results['protection_interval']}$ time units.")
-            if results.get("service_level") is not None:
-                lines.append(f"2. **Target Service Level:** CSL = {results['service_level']:.1%} $\\implies z = {results['z_score']:.4f}$.")
-            else:
-                lines.append(f"2. **Safety Stock:** Pre-specified buffer of {results['safety_stock']:,.2f} units.")
-            lines.append(f"3. **Expected Demand over Protection Interval:** $d \\times (T + L) = {results['demand_mean_per_period']} \\times {results['protection_interval']} = {results['expected_demand_protection_interval']:,.2f}$ units.")
-            lines.append(f"4. **Std Dev over Protection Interval:** $\\sigma_d \\times \\sqrt{{T + L}} = {results['demand_std_per_period']} \\times \\sqrt{{{results['protection_interval']}}} = {results['std_demand_protection_interval']:,.2f}$ units.")
-            lines.append(f"5. **Safety Stock (SS):** $z \\times \\sigma_{{T+L}} = {results['z_score']:.4f} \\times {results['std_demand_protection_interval']:,.2f} = \\mathbf{{{results['safety_stock']:,.2f}}}$ units.")
-            lines.append(f"6. **Order-Up-To Level (S):** $d(T + L) + SS = {results['expected_demand_protection_interval']:,.2f} + {results['safety_stock']:,.2f} = \\mathbf{{{results['order_up_to_level_S']:,.2f}}}$ units.")
-            lines.append(f"7. **Current Inventory Position (IP):** $I_{{OH}} + I_{{OO}} - BO = {results['inventory_on_hand']:,.0f} + {results['inventory_on_order']:,.0f} - {results['backorders']:,.0f} = {results['current_inventory_position']:,.0f}$ units.")
-            lines.append(f"8. **Recommended Order Quantity (Q):** $\\max(0, S - IP) = \\max(0, {results['order_up_to_level_S']:,.2f} - {results['current_inventory_position']:,.0f}) = \\mathbf{{{results['recommended_order_quantity']:,.2f}}}$ units.")
-
+            lines.append("- **Review Cadence:** Periodic review requires higher safety stock than continuous review because inventory is vulnerable across the full $(T + L)$ protection interval rather than just lead time $L$.")
+            lines.append("- **Consolidated Shipments:** Fixed-period review is ideal when grouping orders for multiple products from the same vendor to share transportation setup costs.")
         elif model_type == InventoryModelType.NEWSVENDOR:
-            if results.get("selling_price") is not None and results.get("purchase_cost") is not None:
-                lines.append(f"1. **Cost of Underage ($C_u$):** $p - c + g = \\${results['selling_price']:,.2f} - \\${results['purchase_cost']:,.2f} + \\${results['goodwill_cost']:,.2f} = \\mathbf{{\\${results['cost_underage_Cu']:,.2f}}}$.")
-                lines.append(f"2. **Cost of Overage ($C_o$):** $c - s = \\${results['purchase_cost']:,.2f} - \\${results['salvage_value']:,.2f} = \\mathbf{{\\${results['cost_overage_Co']:,.2f}}}$.")
-            else:
-                lines.append(f"1. **Cost of Underage ($C_u$):** Pre-specified shortage cost = $\\mathbf{{\\${results['cost_underage_Cu']:,.2f}}}$.")
-                lines.append(f"2. **Cost of Overage ($C_o$):** Pre-specified excess cost = $\\mathbf{{\\${results['cost_overage_Co']:,.2f}}}$.")
-            lines.append(f"3. **Critical Fractile ($CF$):** $\\frac{{C_u}}{{C_u + C_o}} = \\frac{{{results['cost_underage_Cu']:,.2f}}}{{{results['cost_underage_Cu']:,.2f} + {results['cost_overage_Co']:,.2f}}} = \\mathbf{{{results['critical_fractile']:.4f}}}$ ({results['critical_fractile']:.2%}).")
-            lines.append(f"4. **Optimal Safety Factor ($z^*$):** $\\Phi^{{-1}}({results['critical_fractile']:.4f}) = {results['z_score']:.4f}$.")
-            lines.append(f"5. **Optimal Order Quantity ($Q^*$):** $\\mu + z^* \\sigma = {results['demand_mean']:,.0f} + ({results['z_score']:.4f} \\times {results['demand_std']:,.0f}) = \\mathbf{{{results['optimal_order_quantity']:,.2f}}}$ units.")
-            lines.append(f"6. **Expected Lost Sales:** {results['expected_lost_sales']:,.2f} units.")
-            lines.append(f"7. **Expected Leftover Inventory:** {results['expected_leftover_units']:,.2f} units.")
-            lines.append(f"8. **Expected Sales:** {results['expected_sales']:,.2f} units.")
-            if results.get("expected_profit") is not None:
-                lines.append(f"9. **Expected Profit:** $\\mathbf{{\\${results['expected_profit']:,.2f}}}$.")
+            lines.append(f"- **Margin Cushion:** With a high margin ($C_u = \\${results['cost_underage_Cu']:,.2f}$ vs $C_o = \\${results['cost_overage_Co']:,.2f}$), the cost of turning away customers far exceeds salvage loss, justifying generous stocking.")
             if results.get("expected_value_of_perfect_information_EVPI") is not None:
-                lines.append(f"10. **Value of Perfect Information (EVPI):** $\\${results['expected_value_of_perfect_information_EVPI']:,.2f}$.")
+                lines.append(f"- **Demand Forecasting:** The EVPI of ${results['expected_value_of_perfect_information_EVPI']:,.2f} represents the maximum dollar amount your firm should pay for advanced market research or demand sensing tools.")
+
+        detailed_explanation = "\n".join(lines)
+        return exec_summary, detailed_explanation
 
         lines.append("")
         lines.append("### ✅ Verification & Quality Audit")

@@ -125,8 +125,13 @@ def display_agent_response(response, verbose: bool = True):
                 print(f"   - {k}: {v}")
 
         print("\n🧮 3. NUMERICAL CALCULATION RESULTS:")
+        excluded_keys = {
+            "evaluated_tiers", "inputs_extracted", "inputs", "variable_definitions",
+            "formula", "formulas", "formula_with_substituted_values",
+            "intermediate_calculations", "final_answer", "verification_checks", "assumptions", "tool"
+        }
         for k, v in response.calculation_results.items():
-            if k != "evaluated_tiers":
+            if k not in excluded_keys and not isinstance(v, (dict, list)):
                 print(f"   - {k}: {v}")
 
         print("\n✅ 4. VERIFICATION AUDIT & SANITY CHECKS:")

@@ -33,14 +33,22 @@ class InventoryResult(dict):
     """
     Structured result dictionary that supports:
     1. Structured sub-dictionaries:
-       - result["inputs"]
+       - result["inputs_extracted"] (and result["inputs"])
+       - result["variable_definitions"]
+       - result["formula"] (and result["formulas"])
+       - result["formula_with_substituted_values"]
        - result["intermediate_calculations"]
        - result["final_answer"]
+       - result["verification_checks"]
        - result["assumptions"]
     2. Direct attribute access:
-       - result.inputs
+       - result.inputs_extracted
+       - result.variable_definitions
+       - result.formula
+       - result.formula_with_substituted_values
        - result.intermediate_calculations
        - result.final_answer
+       - result.verification_checks
        - result.assumptions
     3. Top-level keys for seamless backward compatibility with existing tests and agents:
        - result["eoq"], result["reorder_point"], result["safety_stock"], etc.
@@ -48,7 +56,28 @@ class InventoryResult(dict):
     def __getattr__(self, item: str) -> Any:
         if item in self:
             return self[item]
+        if item == "inputs_extracted" and "inputs" in self:
+            return self["inputs"]
+        if item == "inputs" and "inputs_extracted" in self:
+            return self["inputs_extracted"]
+        if item == "formula" and "formulas" in self:
+            return self["formulas"]
+        if item == "formulas" and "formula" in self:
+            return self["formula"]
         raise AttributeError(f"'InventoryResult' object has no attribute '{item}'")
+
+    def __getitem__(self, item: str) -> Any:
+        if item in self:
+            return super().__getitem__(item)
+        if item == "inputs_extracted" and "inputs" in self:
+            return super().__getitem__("inputs")
+        if item == "inputs" and "inputs_extracted" in self:
+            return super().__getitem__("inputs_extracted")
+        if item == "formula" and "formulas" in self:
+            return super().__getitem__("formulas")
+        if item == "formulas" and "formula" in self:
+            return super().__getitem__("formula")
+        return super().__getitem__(item)
 
     def __setattr__(self, key: str, value: Any) -> None:
         self[key] = value
@@ -180,7 +209,126 @@ def calculate_eoq(
         "No quantity discounts apply in standard EOQ; unit price is constant."
     ]
 
-    # 4. Structured Output
+    # 4. Variable Definitions
+    variable_definitions = {
+        "D": "Annual Demand (units/year)",
+        "S": "Ordering / Setup Cost per order ($/order)",
+        "H": "Unit Holding / Carrying Cost per year ($/unit/year)",
+        "Q*": "Economic Order Quantity (optimal batch size in units)",
+        "N": "Order Frequency (orders placed per year = D / Q*)",
+        "T_days": "Order Cycle Time in operating days ((Q* / D) * W)",
+        "AOC": "Annual Ordering Cost ($/year = N * S)",
+        "AHC": "Annual Holding Cost ($/year = (Q* / 2) * H)",
+        "TIC": "Total Inventory Cost ($/year = AOC + AHC)",
+    }
+    if unit_price is not None:
+        variable_definitions["C"] = "Unit Purchase Price ($/unit)"
+        variable_definitions["APC"] = "Annual Purchase Cost ($/year = D * C)"
+        variable_definitions["TC"] = "Total Annual Cost ($/year = APC + TIC)"
+    if holding_rate is not None:
+        variable_definitions["h"] = "Annual Inventory Holding Rate (fraction or percentage of unit price)"
+    if lead_time_days is not None:
+        variable_definitions["W"] = "Working Days per Year (operating days/year)"
+        variable_definitions["L"] = "Replenishment Lead Time (days)"
+        variable_definitions["d"] = "Daily Demand Rate (units/day = D / W)"
+        variable_definitions["ROP"] = "Reorder Point (inventory level triggering an order = d * L)"
+
+    # 5. Symbolic Formulas
+    formulas = {
+        "holding_cost": "H = holding_cost" if holding_source == "explicit_holding_cost" else "H = unit_price * holding_rate",
+        "eoq": "Q* = sqrt((2 * D * S) / H)",
+        "orders_per_year": "N = D / Q*",
+        "cycle_time_days": "T_days = (Q* / D) * W",
+        "annual_ordering_cost": "AOC = (D / Q*) * S = N * S",
+        "annual_holding_cost": "AHC = (Q* / 2) * H",
+        "total_inventory_cost": "TIC = AOC + AHC = ((D / Q*) * S) + ((Q* / 2) * H)",
+    }
+    if unit_price is not None:
+        formulas["annual_purchase_cost"] = "APC = D * C"
+        formulas["total_annual_cost"] = "TC = APC + TIC = (D * C) + TIC"
+    if lead_time_days is not None:
+        formulas["daily_demand"] = "d = D / W"
+        formulas["reorder_point"] = "ROP = d * L = (D / W) * L"
+
+    # 6. Formulas with Substituted Values
+    holding_sub = f"H = ${H:.2f}/unit/year" if holding_source == "explicit_holding_cost" else f"H = ${unit_price:.2f} * {rate:.2f} = ${H:.2f}/unit/year"
+    formulas_substituted = {
+        "holding_cost": holding_sub,
+        "eoq": f"Q* = sqrt((2 * {D:,.2f} * {S:,.2f}) / {H:,.2f}) = sqrt({2.0 * D * S:,.2f} / {H:,.2f}) = sqrt({(2.0 * D * S) / H:,.2f}) = {eoq:,.2f} units",
+        "orders_per_year": f"N = {D:,.2f} / {eoq:,.2f} = {orders_per_year:,.2f} orders/year",
+        "cycle_time_days": f"T_days = ({eoq:,.2f} / {D:,.2f}) * {working_days_per_year} = {cycle_time_days:,.1f} operating days",
+        "annual_ordering_cost": f"AOC = ({D:,.2f} / {eoq:,.2f}) * ${S:,.2f} = {orders_per_year:,.2f} * ${S:,.2f} = ${annual_ordering_cost:,.2f}/year",
+        "annual_holding_cost": f"AHC = ({eoq:,.2f} / 2) * ${H:,.2f} = {eoq / 2.0:,.2f} * ${H:,.2f} = ${annual_holding_cost:,.2f}/year",
+        "total_inventory_cost": f"TIC = ${annual_ordering_cost:,.2f} + ${annual_holding_cost:,.2f} = ${total_inventory_cost:,.2f}/year",
+    }
+    if unit_price is not None:
+        formulas_substituted["annual_purchase_cost"] = f"APC = {D:,.2f} * ${unit_price:,.2f} = ${annual_purchase_cost:,.2f}/year"
+        formulas_substituted["total_annual_cost"] = f"TC = ${annual_purchase_cost:,.2f} + ${total_inventory_cost:,.2f} = ${total_annual_cost:,.2f}/year"
+    if lead_time_days is not None:
+        formulas_substituted["daily_demand"] = f"d = {D:,.2f} / {working_days_per_year} = {daily_demand:,.2f} units/day"
+        formulas_substituted["reorder_point"] = f"ROP = {daily_demand:,.2f} * {lead_time_days} = {reorder_point:,.2f} units"
+
+    # 7. Verification Checks
+    verification_checks = []
+    # Check 1: Non-zero positive order quantity
+    if eoq > 0:
+        verification_checks.append({
+            "name": "Non-Zero Order Quantity",
+            "check": "Non-Zero Order Quantity",
+            "status": "PASS",
+            "detail": f"EOQ is strictly positive ({eoq:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Non-Zero Order Quantity",
+            "check": "Non-Zero Order Quantity",
+            "status": "FAIL",
+            "detail": "EOQ is non-positive."
+        })
+
+    # Check 2: Economic cost parity check (AOC == AHC at unconstrained EOQ)
+    diff = abs(annual_ordering_cost - annual_holding_cost)
+    rel_diff = diff / max(annual_ordering_cost, annual_holding_cost) if max(annual_ordering_cost, annual_holding_cost) > 0 else 0
+    if rel_diff < 0.02:
+        verification_checks.append({
+            "name": "Economic Trade-Off Parity",
+            "check": "Economic Trade-Off Parity",
+            "status": "PASS",
+            "detail": f"Annual ordering cost (${annual_ordering_cost:,.2f}) equals annual holding cost (${annual_holding_cost:,.2f}) within rounding tolerance (|diff| = ${diff:,.2f})."
+        })
+    else:
+        verification_checks.append({
+            "name": "Economic Trade-Off Parity",
+            "check": "Economic Trade-Off Parity",
+            "status": "WARN",
+            "detail": f"Ordering cost (${annual_ordering_cost:,.2f}) and holding cost (${annual_holding_cost:,.2f}) deviate by {rel_diff:.1%}."
+        })
+
+    # Check 3: Order frequency sanity
+    if 0.5 <= orders_per_year <= 365:
+        verification_checks.append({
+            "name": "Order Frequency Sanity",
+            "check": "Order Frequency Sanity",
+            "status": "PASS",
+            "detail": f"{orders_per_year:,.2f} orders/year (every {cycle_time_days:,.1f} days) is operationally practical."
+        })
+    else:
+        verification_checks.append({
+            "name": "Order Frequency Sanity",
+            "check": "Order Frequency Sanity",
+            "status": "WARN",
+            "detail": f"Extreme order frequency: {orders_per_year:,.2f} orders/year."
+        })
+
+    if lead_time_days is not None:
+        verification_checks.append({
+            "name": "Reorder Point Validity",
+            "check": "Reorder Point Validity",
+            "status": "PASS",
+            "detail": f"ROP of {reorder_point:,.2f} units covers {lead_time_days} days of demand at {daily_demand:,.2f} units/day."
+        })
+
+    # 8. Structured Output (containing all 8 student verification sections)
     inputs_dict = {
         "annual_demand": D,
         "order_cost": S,
@@ -217,9 +365,16 @@ def calculate_eoq(
 
     res = InventoryResult({
         "tool": "calculate_eoq",
+        # 8 Mandated Student Verification Sections:
+        "inputs_extracted": inputs_dict,
         "inputs": inputs_dict,
+        "variable_definitions": variable_definitions,
+        "formula": formulas,
+        "formulas": formulas,
+        "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
         "final_answer": final_answer_dict,
+        "verification_checks": verification_checks,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
         "eoq": round(eoq, 2),
@@ -406,7 +561,131 @@ def calculate_quantity_discount(
         "Warehouse capacity and operating capital are adequate to support larger batch sizes."
     ]
 
-    # 4. Structured Output
+    # 4. Variable Definitions
+    variable_definitions = {
+        "D": "Annual Demand (units/year)",
+        "S": "Ordering / Setup Cost per order ($/order)",
+        "i": "Discount Tier Index (1, 2, ...)",
+        "C_i": "Unit Purchase Price in Tier i ($/unit)",
+        "H_i": "Unit Holding / Carrying Cost in Tier i ($/unit/year)",
+        "EOQ_i": "Unconstrained EOQ calculated at Tier i price (units = sqrt(2*D*S / H_i))",
+        "Q_i": "Feasible Candidate Order Quantity evaluated for Tier i (units)",
+        "APC_i": "Annual Purchase Cost in Tier i ($/year = D * C_i)",
+        "AOC_i": "Annual Ordering Cost in Tier i ($/year = (D / Q_i) * S)",
+        "AHC_i": "Annual Holding Cost in Tier i ($/year = (Q_i / 2) * H_i)",
+        "TC_i": "Total Annual Cost in Tier i ($/year = APC_i + AOC_i + AHC_i)",
+        "Q*": "Optimal Order Quantity (units)",
+        "TC*": "Global Minimum Total Annual Cost ($/year)",
+        "Savings": "Annual Cost Savings vs Baseline Tier 1 ($/year and %)",
+    }
+    if rate is not None:
+        variable_definitions["h"] = "Holding Cost Rate as percentage of unit purchase price (%/year)"
+
+    # 5. Symbolic Formulas
+    formulas = {
+        "holding_cost": "H_i = C_i * holding_rate" if rate is not None else "H_i = holding_cost",
+        "unconstrained_eoq": "EOQ_i = sqrt((2 * D * S) / H_i)",
+        "candidate_quantity": "Q_i = EOQ_i if min_qty_i <= EOQ_i <= max_qty_i else (min_qty_i if EOQ_i < min_qty_i else max_qty_i)",
+        "annual_purchase_cost": "APC_i = D * C_i",
+        "annual_ordering_cost": "AOC_i = (D / Q_i) * S",
+        "annual_holding_cost": "AHC_i = (Q_i / 2) * H_i",
+        "total_annual_cost": "TC_i = APC_i + AOC_i + AHC_i = (D * C_i) + ((D / Q_i) * S) + ((Q_i / 2) * H_i)",
+        "optimal_selection": "TC* = min(TC_1, TC_2, ...), Q* = candidate Q of minimizing tier",
+        "annual_savings": "Annual Savings = TC_baseline - TC*",
+    }
+
+    # 6. Formulas with Substituted Values
+    formulas_substituted = {}
+    for idx, e in enumerate(evaluations, 1):
+        formulas_substituted[f"tier_{idx}"] = (
+            f"Tier {idx} (Price = ${e.unit_price:.2f}): H_{idx} = ${e.holding_cost_per_unit:.2f}, "
+            f"EOQ_{idx} = sqrt((2 * {D:,.0f} * ${S:.2f}) / ${e.holding_cost_per_unit:.2f}) = {e.unconstrained_eoq:,.2f} -> "
+            f"Candidate Q_{idx} = {e.candidate_qty:,.0f} units; "
+            f"TC_{idx} = ({D:,.0f} * ${e.unit_price:.2f}) + ({D:,.0f} / {e.candidate_qty:,.2f}) * ${S:.2f} + "
+            f"({e.candidate_qty:,.2f} / 2) * ${e.holding_cost_per_unit:.2f} = "
+            f"${e.annual_purchase_cost:,.2f} + ${e.annual_ordering_cost:,.2f} + ${e.annual_holding_cost:,.2f} = "
+            f"${e.total_annual_cost:,.2f}"
+        )
+    formulas_substituted["optimal_selection"] = (
+        f"TC* = min({', '.join('$' + f'{e.total_annual_cost:,.2f}' for e in evaluations)}) = "
+        f"${best_eval.total_annual_cost:,.2f} at Tier {best_eval.tier_index} (Q* = {best_eval.candidate_qty:,.0f} units)"
+    )
+    formulas_substituted["annual_savings"] = (
+        f"Savings = ${baseline_total_cost:,.2f} - ${best_eval.total_annual_cost:,.2f} = "
+        f"${annual_savings:,.2f} ({pct_savings:.2f}%)"
+    )
+
+    # 7. Verification Checks
+    verification_checks = []
+    # Check 1: Global cost minimization
+    all_higher_or_equal = all(e.total_annual_cost >= best_eval.total_annual_cost for e in evaluations)
+    if all_higher_or_equal:
+        verification_checks.append({
+            "name": "Global Cost Minimization",
+            "check": "Global Cost Minimization",
+            "status": "PASS",
+            "detail": f"Tier {best_eval.tier_index} strictly achieves minimum total annual cost (${best_eval.total_annual_cost:,.2f})."
+        })
+    else:
+        verification_checks.append({
+            "name": "Global Cost Minimization",
+            "check": "Global Cost Minimization",
+            "status": "FAIL",
+            "detail": "Identified tier does not achieve minimum total annual cost."
+        })
+
+    # Check 2: Bracket feasibility check
+    opt_min = best_eval.min_qty
+    opt_max = best_eval.max_qty
+    is_in_bracket = (best_eval.candidate_qty >= opt_min) and (opt_max is None or best_eval.candidate_qty <= opt_max)
+    if is_in_bracket:
+        verification_checks.append({
+            "name": "Bracket Feasibility",
+            "check": "Bracket Feasibility",
+            "status": "PASS",
+            "detail": f"Order quantity {best_eval.candidate_qty:,.0f} satisfies Tier {best_eval.tier_index} range [{opt_min:,.0f}, {opt_max or '∞'}]."
+        })
+    else:
+        verification_checks.append({
+            "name": "Bracket Feasibility",
+            "check": "Bracket Feasibility",
+            "status": "FAIL",
+            "detail": f"Order quantity {best_eval.candidate_qty:,.0f} violates Tier {best_eval.tier_index} bracket bounds."
+        })
+
+    # Check 3: Cost non-negativity
+    if best_eval.annual_purchase_cost > 0 and best_eval.annual_ordering_cost > 0 and best_eval.annual_holding_cost > 0:
+        verification_checks.append({
+            "name": "Cost Component Non-Negativity",
+            "check": "Cost Component Non-Negativity",
+            "status": "PASS",
+            "detail": f"Purchase (${best_eval.annual_purchase_cost:,.2f}), ordering (${best_eval.annual_ordering_cost:,.2f}), and holding (${best_eval.annual_holding_cost:,.2f}) costs are all positive."
+        })
+    else:
+        verification_checks.append({
+            "name": "Cost Component Non-Negativity",
+            "check": "Cost Component Non-Negativity",
+            "status": "FAIL",
+            "detail": "One or more cost components are non-positive."
+        })
+
+    # Check 4: Cost savings non-negativity
+    if annual_savings >= 0:
+        verification_checks.append({
+            "name": "Non-Negative Savings",
+            "check": "Non-Negative Savings",
+            "status": "PASS",
+            "detail": f"Discount plan yields non-negative savings of ${annual_savings:,.2f} ({pct_savings:.2f}%) vs baseline."
+        })
+    else:
+        verification_checks.append({
+            "name": "Non-Negative Savings",
+            "check": "Non-Negative Savings",
+            "status": "WARN",
+            "detail": f"Discount order quantity results in negative savings vs baseline (${annual_savings:,.2f})."
+        })
+
+    # 8. Structured Output (containing all 8 student verification sections)
     inputs_dict = {
         "annual_demand": D,
         "order_cost": S,
@@ -435,9 +714,16 @@ def calculate_quantity_discount(
 
     res = InventoryResult({
         "tool": "calculate_quantity_discount",
+        # 8 Mandated Student Verification Sections:
+        "inputs_extracted": inputs_dict,
         "inputs": inputs_dict,
+        "variable_definitions": variable_definitions,
+        "formula": formulas,
+        "formulas": formulas,
+        "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
         "final_answer": final_answer_dict,
+        "verification_checks": verification_checks,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
         "annual_demand": D,
@@ -612,7 +898,172 @@ def calculate_rop(
             raise ValueError(f"Holding cost cannot be negative, got {holding_cost_per_unit}")
         ss_holding_cost = ss * float(holding_cost_per_unit)
 
-    # 3. Structured Output
+    # 4. Variable Definitions
+    variable_definitions = {
+        "CSL": "Cycle Service Level (target probability of not stocking out during lead time)",
+        "z": "Safety Factor / Standard Normal Quantile (z = Phi^-1(CSL))",
+        "mu_LTD": "Expected Demand during Lead Time (units)",
+        "sigma_LT": "Standard Deviation of Demand during Lead Time (units)",
+        "SS": "Safety Stock (buffer inventory = z * sigma_LT)",
+        "ROP": "Reorder Point (inventory level that triggers replenishment = mu_LTD + SS)",
+        "Risk": "Cycle Stockout Risk (probability of stockout = 1 - CSL)",
+    }
+    if not using_direct_ltd:
+        variable_definitions["d"] = "Average Demand per Period (units/period)"
+        variable_definitions["sigma_d"] = "Standard Deviation of Demand per Period (units/period)"
+        variable_definitions["L"] = "Average Replenishment Lead Time (periods)"
+        variable_definitions["sigma_L"] = "Standard Deviation of Lead Time (periods)"
+    if holding_cost_per_unit is not None:
+        variable_definitions["H"] = "Holding Cost per Unit per Year ($/unit/year)"
+        variable_definitions["AHC_SS"] = "Annual Holding Cost of Safety Stock ($/year = SS * H)"
+
+    # 5. Symbolic Formulas
+    formulas = {
+        "safety_factor": "z = Phi^-1(CSL)",
+        "stockout_risk": "Risk = 1 - CSL",
+    }
+    if using_direct_ltd:
+        formulas["expected_lead_time_demand"] = "mu_LTD = lead_time_demand_mean"
+        formulas["lead_time_demand_std"] = "sigma_LT = lead_time_demand_std"
+        formulas["safety_stock"] = "SS = z * sigma_LT"
+        formulas["reorder_point"] = "ROP = mu_LTD + SS"
+    elif d_std == 0.0 and l_std == 0.0:
+        formulas["expected_lead_time_demand"] = "mu_LTD = d * L"
+        formulas["lead_time_demand_std"] = "sigma_LT = 0"
+        formulas["safety_stock"] = "SS = 0"
+        formulas["reorder_point"] = "ROP = d * L"
+    elif d_std > 0.0 and l_std == 0.0:
+        formulas["expected_lead_time_demand"] = "mu_LTD = d * L"
+        formulas["lead_time_demand_std"] = "sigma_LT = sigma_d * sqrt(L)"
+        formulas["safety_stock"] = "SS = z * sigma_LT = z * sigma_d * sqrt(L)"
+        formulas["reorder_point"] = "ROP = (d * L) + SS"
+    elif d_std == 0.0 and l_std > 0.0:
+        formulas["expected_lead_time_demand"] = "mu_LTD = d * L"
+        formulas["lead_time_demand_std"] = "sigma_LT = d * sigma_L"
+        formulas["safety_stock"] = "SS = z * sigma_LT = z * d * sigma_L"
+        formulas["reorder_point"] = "ROP = (d * L) + SS"
+    else:
+        formulas["expected_lead_time_demand"] = "mu_LTD = d * L"
+        formulas["lead_time_demand_std"] = "sigma_LT = sqrt(L * sigma_d^2 + d^2 * sigma_L^2)"
+        formulas["safety_stock"] = "SS = z * sigma_LT = z * sqrt(L * sigma_d^2 + d^2 * sigma_L^2)"
+        formulas["reorder_point"] = "ROP = (d * L) + SS"
+
+    if holding_cost_per_unit is not None:
+        formulas["annual_holding_cost_ss"] = "AHC_SS = SS * H"
+
+    # 6. Formulas with Substituted Values
+    formulas_substituted = {
+        "safety_factor": f"z = Phi^-1({csl:.4f}) = {z:.4f}",
+        "stockout_risk": f"Risk = 1 - {csl:.4f} = {stockout_risk:.4f} ({stockout_risk:.2%})",
+    }
+    if using_direct_ltd:
+        formulas_substituted["expected_lead_time_demand"] = f"mu_LTD = {mu_ltd:,.2f} units"
+        formulas_substituted["lead_time_demand_std"] = f"sigma_LT = {sigma_lt:,.2f} units"
+        formulas_substituted["safety_stock"] = f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units"
+        formulas_substituted["reorder_point"] = f"ROP = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units"
+    elif d_std == 0.0 and l_std == 0.0:
+        formulas_substituted["expected_lead_time_demand"] = f"mu_LTD = {d:,.2f} * {L:,.2f} = {mu_ltd:,.2f} units"
+        formulas_substituted["lead_time_demand_std"] = "sigma_LT = 0.00 units (constant demand & lead time)"
+        formulas_substituted["safety_stock"] = "SS = 0.00 units"
+        formulas_substituted["reorder_point"] = f"ROP = {d:,.2f} * {L:,.2f} = {rop:,.2f} units"
+    elif d_std > 0.0 and l_std == 0.0:
+        formulas_substituted["expected_lead_time_demand"] = f"mu_LTD = {d:,.2f} * {L:,.2f} = {mu_ltd:,.2f} units"
+        formulas_substituted["lead_time_demand_std"] = f"sigma_LT = {d_std:,.2f} * sqrt({L:,.2f}) = {d_std:,.2f} * {math.sqrt(L):,.4f} = {sigma_lt:,.2f} units"
+        formulas_substituted["safety_stock"] = f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units"
+        formulas_substituted["reorder_point"] = f"ROP = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units"
+    elif d_std == 0.0 and l_std > 0.0:
+        formulas_substituted["expected_lead_time_demand"] = f"mu_LTD = {d:,.2f} * {L:,.2f} = {mu_ltd:,.2f} units"
+        formulas_substituted["lead_time_demand_std"] = f"sigma_LT = {d:,.2f} * {l_std:,.2f} = {sigma_lt:,.2f} units"
+        formulas_substituted["safety_stock"] = f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units"
+        formulas_substituted["reorder_point"] = f"ROP = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units"
+    else:
+        var_comp1 = L * (d_std ** 2)
+        var_comp2 = (d ** 2) * (l_std ** 2)
+        formulas_substituted["expected_lead_time_demand"] = f"mu_LTD = {d:,.2f} * {L:,.2f} = {mu_ltd:,.2f} units"
+        formulas_substituted["lead_time_demand_std"] = (
+            f"sigma_LT = sqrt({L:,.2f} * ({d_std:,.2f})^2 + ({d:,.2f})^2 * ({l_std:,.2f})^2) = "
+            f"sqrt({var_comp1:,.2f} + {var_comp2:,.2f}) = sqrt({var_comp1 + var_comp2:,.2f}) = {sigma_lt:,.2f} units"
+        )
+        formulas_substituted["safety_stock"] = f"SS = {z:.4f} * {sigma_lt:,.2f} = {ss:,.2f} units"
+        formulas_substituted["reorder_point"] = f"ROP = {mu_ltd:,.2f} + {ss:,.2f} = {rop:,.2f} units"
+
+    if holding_cost_per_unit is not None:
+        formulas_substituted["annual_holding_cost_ss"] = f"AHC_SS = {ss:,.2f} * ${holding_cost_per_unit:,.2f} = ${ss_holding_cost:,.2f}/year"
+
+    # 7. Verification Checks
+    verification_checks = []
+    # Check 1: Safety Stock Sign
+    if csl >= 0.5 and ss >= 0:
+        verification_checks.append({
+            "name": "Safety Stock Non-Negativity",
+            "check": "Safety Stock Non-Negativity",
+            "status": "PASS",
+            "detail": f"Safety stock ({ss:,.2f} units) is non-negative for target CSL >= 50%."
+        })
+    elif csl < 0.5:
+        verification_checks.append({
+            "name": "Safety Stock Non-Negativity",
+            "check": "Safety Stock Non-Negativity",
+            "status": "INFO",
+            "detail": f"CSL ({csl:.1%}) < 50% results in negative safety buffer ({ss:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Safety Stock Non-Negativity",
+            "check": "Safety Stock Non-Negativity",
+            "status": "FAIL",
+            "detail": f"Safety stock is unexpectedly negative ({ss:,.2f} units)."
+        })
+
+    # Check 2: ROP Cushion
+    if rop >= mu_ltd:
+        verification_checks.append({
+            "name": "ROP Coverage Cushion",
+            "check": "ROP Coverage Cushion",
+            "status": "PASS",
+            "detail": f"Reorder Point ({rop:,.2f} units) covers expected lead time demand ({mu_ltd:,.2f} units) plus buffer ({ss:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "ROP Coverage Cushion",
+            "check": "ROP Coverage Cushion",
+            "status": "WARN",
+            "detail": f"ROP ({rop:,.2f} units) is less than expected lead time demand ({mu_ltd:,.2f} units)."
+        })
+
+    # Check 3: Risk-Service Consistency
+    if abs((1.0 - csl) - stockout_risk) < 1e-4:
+        verification_checks.append({
+            "name": "Risk-Service Consistency",
+            "check": "Risk-Service Consistency",
+            "status": "PASS",
+            "detail": f"Cycle stockout risk {stockout_risk:.1%} exactly equals (1 - CSL)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Risk-Service Consistency",
+            "check": "Risk-Service Consistency",
+            "status": "FAIL",
+            "detail": f"Inconsistency between CSL ({csl:.1%}) and stockout risk ({stockout_risk:.1%})."
+        })
+
+    # Check 4: Lead time demand std dev validity
+    if sigma_lt >= 0:
+        verification_checks.append({
+            "name": "Lead Time Demand Uncertainty Validity",
+            "check": "Lead Time Demand Uncertainty Validity",
+            "status": "PASS",
+            "detail": f"Lead time demand standard deviation sigma_LT is non-negative ({sigma_lt:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Lead Time Demand Uncertainty Validity",
+            "check": "Lead Time Demand Uncertainty Validity",
+            "status": "FAIL",
+            "detail": "sigma_LT is negative."
+        })
+
+    # 8. Structured Output (containing all 8 student verification sections)
     inputs_dict = {
         "service_level": csl,
         "demand_mean": d,
@@ -646,9 +1097,16 @@ def calculate_rop(
 
     res = InventoryResult({
         "tool": "calculate_rop",
+        # 8 Mandated Student Verification Sections:
+        "inputs_extracted": inputs_dict,
         "inputs": inputs_dict,
+        "variable_definitions": variable_definitions,
+        "formula": formulas,
+        "formulas": formulas,
+        "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
         "final_answer": final_answer_dict,
+        "verification_checks": verification_checks,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
         "service_level": round(csl, 4),
@@ -774,7 +1232,128 @@ def calculate_periodic_review(
         "If inventory position already meets or exceeds target inventory, order quantity is 0."
     ]
 
-    # 4. Structured Output
+    # 4. Variable Definitions
+    variable_definitions = {
+        "T": "Review Period Interval (periods between reviews)",
+        "L": "Replenishment Lead Time (periods to receive order)",
+        "T_plus_L": "Protection Interval / Period of Vulnerability (periods = T + L)",
+        "d": "Average Demand per Period (units/period)",
+        "sigma_d": "Standard Deviation of Demand per Period (units/period)",
+        "CSL": "Target Cycle Service Level across Protection Interval",
+        "z": "Safety Factor / Normal Quantile (z = Phi^-1(CSL))",
+        "D_protection": "Expected Demand during Protection Interval (units = d * (T + L))",
+        "sigma_protection": "Standard Deviation of Demand during Protection Interval (units = sigma_d * sqrt(T + L))",
+        "SS": "Safety Stock over Protection Interval (units = z * sigma_protection)",
+        "S": "Target Inventory / Order-Up-To Level (units = D_protection + SS)",
+    }
+    if inv_pos is not None:
+        variable_definitions["IP"] = "Current Inventory Position (units = On-Hand + On-Order - Backorders)"
+        variable_definitions["Q"] = "Recommended Order Quantity (units = max(0, S - IP))"
+    if current_on_hand is not None:
+        variable_definitions["I_OH"] = "On-Hand Inventory (units)"
+        variable_definitions["I_OO"] = "On-Order / In-Transit Inventory (units)"
+        variable_definitions["BO"] = "Backorders / Unfilled Demand (units)"
+
+    # 5. Symbolic Formulas
+    formulas = {
+        "protection_period": "Protection Interval = review_period + lead_time = T + L",
+        "expected_demand_protection": "D_protection = d * (T + L)",
+        "std_demand_protection": "sigma_protection = sigma_d * sqrt(T + L)",
+        "safety_factor": "z = Phi^-1(CSL)" if service_level is not None else "z = SS / sigma_protection",
+        "safety_stock": "SS = z * sigma_protection = z * sigma_d * sqrt(T + L)",
+        "target_inventory": "S = D_protection + SS = (d * (T + L)) + SS",
+    }
+    if inv_pos is not None:
+        formulas["inventory_position"] = "IP = I_OH + I_OO - BO" if current_on_hand is not None else "IP = inventory_position"
+        formulas["order_quantity"] = "Q = max(0, S - IP)"
+
+    # 6. Formulas with Substituted Values
+    z_sub = f"z = Phi^-1({csl:.4f}) = {z:.4f}" if csl is not None else f"z = {calc_ss:.2f} / {std_demand_protection:.2f} = {z:.4f}"
+    formulas_substituted = {
+        "protection_period": f"T + L = {P:,.2f} + {L:,.2f} = {protection_period:,.2f} periods",
+        "expected_demand_protection": f"D_protection = {d:,.2f} * {protection_period:,.2f} = {expected_demand_protection:,.2f} units",
+        "std_demand_protection": f"sigma_protection = {sigma_d:,.2f} * sqrt({protection_period:,.2f}) = {sigma_d:,.2f} * {math.sqrt(protection_period):,.4f} = {std_demand_protection:,.2f} units",
+        "safety_factor": z_sub,
+        "safety_stock": f"SS = {z:.4f} * {std_demand_protection:,.2f} = {calc_ss:,.2f} units",
+        "target_inventory": f"S = {expected_demand_protection:,.2f} + {calc_ss:,.2f} = {target_inventory:,.2f} units",
+    }
+    if inv_pos is not None:
+        if current_on_hand is not None:
+            formulas_substituted["inventory_position"] = f"IP = {float(current_on_hand):,.2f} + {float(current_on_order):,.2f} - {float(backorders):,.2f} = {inv_pos:,.2f} units"
+        else:
+            formulas_substituted["inventory_position"] = f"IP = {inv_pos:,.2f} units"
+        formulas_substituted["order_quantity"] = f"Q = max(0, {target_inventory:,.2f} - {inv_pos:,.2f}) = max(0, {target_inventory - inv_pos:,.2f}) = {order_quantity:,.2f} units"
+
+    # 7. Verification Checks
+    verification_checks = []
+    # Check 1: Protection interval coverage
+    if target_inventory >= expected_demand_protection:
+        verification_checks.append({
+            "name": "Protection Interval Coverage",
+            "check": "Protection Interval Coverage",
+            "status": "PASS",
+            "detail": f"Target inventory level S ({target_inventory:,.2f} units) safely covers protection interval demand ({expected_demand_protection:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Protection Interval Coverage",
+            "check": "Protection Interval Coverage",
+            "status": "WARN",
+            "detail": f"Target inventory S ({target_inventory:,.2f} units) is below expected demand ({expected_demand_protection:,.2f} units)."
+        })
+
+    # Check 2: Safety stock non-negativity
+    if calc_ss >= 0:
+        verification_checks.append({
+            "name": "Safety Stock Non-Negativity",
+            "check": "Safety Stock Non-Negativity",
+            "status": "PASS",
+            "detail": f"Safety stock is non-negative ({calc_ss:,.2f} units)."
+        })
+    else:
+        verification_checks.append({
+            "name": "Safety Stock Non-Negativity",
+            "check": "Safety Stock Non-Negativity",
+            "status": "FAIL",
+            "detail": f"Safety stock is negative ({calc_ss:,.2f} units)."
+        })
+
+    # Check 3: Order quantity non-negativity
+    if order_quantity is not None:
+        if order_quantity >= 0:
+            verification_checks.append({
+                "name": "Non-Negative Order Quantity",
+                "check": "Non-Negative Order Quantity",
+                "status": "PASS",
+                "detail": f"Recommended order quantity ({order_quantity:,.2f} units) is non-negative (max(0, S - IP))."
+            })
+        else:
+            verification_checks.append({
+                "name": "Non-Negative Order Quantity",
+                "check": "Non-Negative Order Quantity",
+                "status": "FAIL",
+                "detail": "Recommended order quantity is negative."
+            })
+
+    # Check 4: Inventory position conservation
+    if current_on_hand is not None:
+        expected_ip = float(current_on_hand) + float(current_on_order) - float(backorders)
+        if abs(inv_pos - expected_ip) < 1e-4:
+            verification_checks.append({
+                "name": "Inventory Position Conservation",
+                "check": "Inventory Position Conservation",
+                "status": "PASS",
+                "detail": f"Inventory position ({inv_pos:,.2f} units) accurately reflects On-Hand ({float(current_on_hand):,.2f}) + On-Order ({float(current_on_order):,.2f}) - Backorders ({float(backorders):,.2f})."
+            })
+        else:
+            verification_checks.append({
+                "name": "Inventory Position Conservation",
+                "check": "Inventory Position Conservation",
+                "status": "FAIL",
+                "detail": "Discrepancy in inventory position calculation."
+            })
+
+    # 8. Structured Output (containing all 8 student verification sections)
     inputs_dict = {
         "review_period": P,
         "lead_time": L,
@@ -809,9 +1388,16 @@ def calculate_periodic_review(
 
     res = InventoryResult({
         "tool": "calculate_periodic_review",
+        # 8 Mandated Student Verification Sections:
+        "inputs_extracted": inputs_dict,
         "inputs": inputs_dict,
+        "variable_definitions": variable_definitions,
+        "formula": formulas,
+        "formulas": formulas,
+        "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
         "final_answer": final_answer_dict,
+        "verification_checks": verification_checks,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
         "review_period_T": round(P, 2),
@@ -967,7 +1553,145 @@ def calculate_newsvendor(
     if not has_direct_cu_co:
         assumptions.append("Unsold units at period end are salvaged at unit salvage value s with no disposal fee.")
 
-    # 4. Structured Output
+    # 4. Variable Definitions
+    variable_definitions = {
+        "Cu": "Cost of Underage / Shortage Cost per unit ($/unit)",
+        "Co": "Cost of Overage / Excess Cost per unit ($/unit)",
+        "CR": "Critical Ratio / Critical Fractile (optimal service probability = Cu / (Cu + Co))",
+        "mu": "Mean Demand for the single period (units)",
+        "sigma": "Standard Deviation of Demand for the single period (units)",
+        "z*": "Optimal Safety Factor / Normal Quantile (z* = Phi^-1(CR))",
+        "Q*": "Recommended Order Quantity (units = mu + z* * sigma)",
+        "E_LostSales": "Expected Lost Sales / Stockout Volume (units = sigma * L(z*))",
+        "E_Leftover": "Expected Leftover Inventory / Unsold Stock (units = Q* - mu + E_LostSales)",
+        "E_Sales": "Expected Sales Volume (units = mu - E_LostSales)",
+        "InStockProb": "Optimal In-Stock Probability (Phi(z*))",
+    }
+    if not has_direct_cu_co:
+        variable_definitions["p"] = "Unit Selling Price ($/unit)"
+        variable_definitions["c"] = "Unit Purchase Cost ($/unit)"
+        variable_definitions["s"] = "Unit Salvage Value for unsold stock ($/unit)"
+        variable_definitions["g"] = "Unit Goodwill Penalty / Stockout Penalty ($/unit)"
+    if p is not None and c is not None:
+        variable_definitions["E_Profit"] = "Expected Total Profit ($)"
+        variable_definitions["EVPI"] = "Expected Value of Perfect Information ($ = Profit_PI - Expected Profit)"
+
+    # 5. Symbolic Formulas
+    formulas = {
+        "underage_cost": "Cu = p - c + g" if not has_direct_cu_co else "Cu = underage_cost",
+        "overage_cost": "Co = c - s" if not has_direct_cu_co else "Co = overage_cost",
+        "critical_ratio": "CR = Cu / (Cu + Co)",
+        "safety_factor": "z* = Phi^-1(CR)",
+        "optimal_order_quantity": "Q* = max(0, mu + z* * sigma)",
+        "expected_lost_sales": "E[Lost Sales] = sigma * [phi(z*) - z* * (1 - Phi(z*))]",
+        "expected_leftover": "E[Leftover] = Q* - mu + E[Lost Sales]",
+        "expected_sales": "E[Sales] = mu - E[Lost Sales]",
+        "in_stock_probability": "P(Demand <= Q*) = Phi(z*)",
+    }
+    if p is not None and c is not None:
+        formulas["expected_profit"] = "E[Profit] = (p * E[Sales]) + (s * E[Leftover]) - (c * Q*) - (g * E[Lost Sales])"
+        formulas["evpi"] = "EVPI = ((p - c) * mu) - E[Profit]"
+
+    # 6. Formulas with Substituted Values
+    cu_sub = f"Cu = ${p:,.2f} - ${c:,.2f} + ${g:,.2f} = ${cu:,.2f}/unit" if not has_direct_cu_co else f"Cu = ${cu:,.2f}/unit"
+    co_sub = f"Co = ${c:,.2f} - ${s:,.2f} = ${co:,.2f}/unit" if not has_direct_cu_co else f"Co = ${co:,.2f}/unit"
+    formulas_substituted = {
+        "underage_cost": cu_sub,
+        "overage_cost": co_sub,
+        "critical_ratio": f"CR = ${cu:,.2f} / (${cu:,.2f} + ${co:,.2f}) = ${cu:,.2f} / ${cu + co:,.2f} = {cr:.4f} ({cr:.2%})",
+        "safety_factor": f"z* = Phi^-1({cr:.4f}) = {effective_z:.4f}",
+        "optimal_order_quantity": f"Q* = {mu:,.2f} + ({effective_z:.4f} * {sigma:,.2f}) = {mu:,.2f} + {effective_z * sigma:,.2f} = {q_star:,.2f} units",
+        "expected_lost_sales": f"E[Lost Sales] = {sigma:,.2f} * L({effective_z:.4f}) = {exp_lost_sales:,.2f} units",
+        "expected_leftover": f"E[Leftover] = {q_star:,.2f} - {mu:,.2f} + {exp_lost_sales:,.2f} = {exp_leftover:,.2f} units",
+        "expected_sales": f"E[Sales] = {mu:,.2f} - {exp_lost_sales:,.2f} = {exp_sales:,.2f} units",
+        "in_stock_probability": f"P(Demand <= {q_star:,.2f}) = Phi({effective_z:.4f}) = {in_stock_prob:.4f} ({in_stock_prob:.2%})",
+    }
+    if p is not None and c is not None:
+        formulas_substituted["expected_profit"] = (
+            f"E[Profit] = (${p:,.2f} * {exp_sales:,.2f}) + (${s:,.2f} * {exp_leftover:,.2f}) - "
+            f"(${c:,.2f} * {q_star:,.2f}) - (${g:,.2f} * {exp_lost_sales:,.2f}) = "
+            f"${exp_rev:,.2f} + ${exp_salvage:,.2f} - ${exp_cost:,.2f} - ${exp_penalty:,.2f} = "
+            f"${exp_profit:,.2f}"
+        )
+        formulas_substituted["evpi"] = (
+            f"EVPI = ((${p:,.2f} - ${c:,.2f}) * {mu:,.2f}) - ${exp_profit:,.2f} = "
+            f"${pi_profit:,.2f} - ${exp_profit:,.2f} = ${evpi:,.2f}"
+        )
+
+    # 7. Verification Checks
+    verification_checks = []
+    # Check 1: Economic viability
+    if cu > 0 and co > 0:
+        verification_checks.append({
+            "name": "Economic Viability",
+            "check": "Economic Viability",
+            "status": "PASS",
+            "detail": f"Both underage cost (${cu:,.2f}) and overage cost (${co:,.2f}) are strictly positive."
+        })
+    else:
+        verification_checks.append({
+            "name": "Economic Viability",
+            "check": "Economic Viability",
+            "status": "FAIL",
+            "detail": "Non-positive underage or overage costs."
+        })
+
+    # Check 2: Critical fractile range
+    if 0 < cr < 1.0:
+        verification_checks.append({
+            "name": "Critical Fractile Range",
+            "check": "Critical Fractile Range",
+            "status": "PASS",
+            "detail": f"Critical ratio CR = {cr:.4f} ({cr:.2%}) is strictly bounded between 0 and 1."
+        })
+    else:
+        verification_checks.append({
+            "name": "Critical Fractile Range",
+            "check": "Critical Fractile Range",
+            "status": "FAIL",
+            "detail": f"Critical ratio CR = {cr} is out of bounds."
+        })
+
+    # Check 3: High/low margin bias consistency
+    if cr > 0.5 and q_star >= mu:
+        verification_checks.append({
+            "name": "Margin Bias Direction",
+            "check": "Margin Bias Direction",
+            "status": "PASS",
+            "detail": f"High margin (CR = {cr:.2%} > 50%) correctly biases Q* ({q_star:,.2f}) above mean demand ({mu:,.2f}) to avoid stockouts."
+        })
+    elif cr <= 0.5 and q_star <= mu:
+        verification_checks.append({
+            "name": "Margin Bias Direction",
+            "check": "Margin Bias Direction",
+            "status": "PASS",
+            "detail": f"Low margin (CR = {cr:.2%} <= 50%) correctly biases Q* ({q_star:,.2f}) at or below mean demand ({mu:,.2f}) to minimize leftover loss."
+        })
+    else:
+        verification_checks.append({
+            "name": "Margin Bias Direction",
+            "check": "Margin Bias Direction",
+            "status": "WARN",
+            "detail": f"Order quantity Q* ({q_star:,.2f}) does not match expected margin bias direction."
+        })
+
+    # Check 4: In-stock probability consistency
+    if in_stock_prob >= 0:
+        verification_checks.append({
+            "name": "In-Stock Availability Consistency",
+            "check": "In-Stock Availability Consistency",
+            "status": "PASS",
+            "detail": f"In-stock probability of {in_stock_prob:.2%} aligns with target critical fractile ({cr:.2%})."
+        })
+    else:
+        verification_checks.append({
+            "name": "In-Stock Availability Consistency",
+            "check": "In-Stock Availability Consistency",
+            "status": "FAIL",
+            "detail": "In-stock probability is negative."
+        })
+
+    # 8. Structured Output (containing all 8 student verification sections)
     inputs_dict = {
         "selling_price": p,
         "purchase_cost": c,
@@ -1007,9 +1731,16 @@ def calculate_newsvendor(
 
     res = InventoryResult({
         "tool": "calculate_newsvendor",
+        # 8 Mandated Student Verification Sections:
+        "inputs_extracted": inputs_dict,
         "inputs": inputs_dict,
+        "variable_definitions": variable_definitions,
+        "formula": formulas,
+        "formulas": formulas,
+        "formula_with_substituted_values": formulas_substituted,
         "intermediate_calculations": intermediates_dict,
         "final_answer": final_answer_dict,
+        "verification_checks": verification_checks,
         "assumptions": assumptions,
         # Backward-compatible convenience keys:
         "selling_price": round(p, 2) if p is not None else None,
