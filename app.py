@@ -23,7 +23,7 @@ Usage:
 import argparse
 import os
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 from inventory_agent import InventoryAgent, InventoryModelType
 
@@ -296,27 +296,79 @@ def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
     }
 
 
-def get_multicriteria_managerial_insight(sales_class: str, hits_class: str) -> str:
-    """Provide actionable supply chain managerial advice based on BOTH Sales ($) and Hits."""
+def get_multicriteria_managerial_insight(
+    sales_class: str,
+    hits_class: str,
+    final_class: Optional[str] = None,
+    score: Optional[float] = None
+) -> str:
+    """
+    Provide actionable supply chain managerial advice based on BOTH Sales ($) and Hits,
+    incorporating the Combined Weighted Score and Final Inventory Classification:
+      - Score assignments: A = 4, B = 3, C = 2, D = 1
+      - Combined Weighted Score = 0.65(Sales ($) Score) + 0.35(Hits Score)
+      - Final Inventory Classification:
+          A: 4.00 to 3.25
+          B: 3.24 to 2.50
+          C: 2.49 to 1.75
+          D: < 1.75
+    """
+    score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
+    s_s = score_map.get(str(sales_class).strip().upper(), 1)
+    h_s = score_map.get(str(hits_class).strip().upper(), 1)
+    if score is None:
+        score = round(0.65 * s_s + 0.35 * h_s, 2)
+    if final_class is None:
+        if score >= 3.25:
+            final_class = "A"
+        elif score >= 2.50:
+            final_class = "B"
+        elif score >= 1.75:
+            final_class = "C"
+        else:
+            final_class = "D"
+
     insight_map = {
-        ("A", "A"): "Critical Revenue & Velocity: Continuous daily review, automated replenishment, tight vendor integration, 98-99% service level, prime golden-zone warehouse slotting.",
-        ("A", "B"): "High Revenue, Moderate Velocity: Weekly review, standard safety buffer, automated reordering, high-priority rack placement.",
-        ("A", "C"): "High Dollar, Slow Moving: Periodic review, strict purchasing approval, minimize buffer stock to protect working capital.",
-        ("A", "D"): "High Dollar, Lumpy Demand: Capital-intensive, infrequent demand. Strictly make-to-order (MTO) or contract-on-demand, zero safety stock.",
-        ("B", "A"): "Moderate Revenue, High Velocity: Fast-moving staple. Maintain safety stock buffer to avoid pick line stockouts, ergonomic pick slotting.",
-        ("B", "B"): "Balanced Standard SKU: Moderate sales and volume. EOQ batching with standard periodic review and reorder point.",
-        ("B", "C"): "Moderate Revenue, Slow Velocity: Low pick frequency. Consolidate order cycles, monitor holding costs.",
-        ("B", "D"): "Moderate Revenue, Infrequent Demand: Reorder upon customer order confirmation or low min-max buffer.",
-        ("C", "A"): "Low Revenue, High Velocity (Consumables/Fasteners): Cheap fast movers. Bulk batch purchasing, two-bin visual Kanban replenishment, high service level.",
-        ("C", "B"): "Low Revenue, Moderate Velocity: Low financial risk. Standard periodic review with simplified controls.",
-        ("C", "C"): "Low Revenue, Slow Velocity: Order-up-to periodic review with wide review intervals.",
-        ("C", "D"): "Low Revenue, Infrequent: Candidate for catalog rationalization or minimum stocking.",
-        ("D", "A"): "Low Revenue, High Transactions: Inexpensive supplies. Bulk ordering, minimal inventory management overhead.",
-        ("D", "B"): "Minor Volume SKU: Negligible sales impact. Reorder in small batches as needed.",
-        ("D", "C"): "Slow Moving, Low Value: Review for potential phase-out or vendor return.",
-        ("D", "D"): "Dead Stock / Obsolete Candidates: Minimal revenue and near-zero velocity. Candidate for immediate rationalization, liquidation, or purge."
+        ("A", "A"): f"Final Class {final_class} (Score: {score:.2f} | Sales A, Hits A): Top-Priority Core SKU. Exceptional dollar volume and pick velocity. Continuous daily review, automated replenishment, tight supplier integration, 98-99% service level, prime golden-zone warehouse slotting.",
+        ("A", "B"): f"Final Class {final_class} (Score: {score:.2f} | Sales A, Hits B): High-Revenue Active SKU. Top sales driver with steady order frequency. Weekly review, automated reordering, high-priority rack placement, 95-98% service level.",
+        ("B", "A"): f"Final Class {final_class} (Score: {score:.2f} | Sales B, Hits A): Fast-Moving Core Staple. High pick frequency elevates this moderate-sales item to Class A. Maintain safety buffer to prevent stockouts on pick lines, ergonomic golden-zone slotting.",
+        ("A", "C"): f"Final Class {final_class} (Score: {score:.2f} | Sales A, Hits C): High-Dollar Low-Velocity SKU. Top sales contribution elevates this item to Class A despite lower pick frequency. Periodic review with tight order batching, strict purchasing approval, minimize buffer stock to protect working capital.",
+        ("B", "B"): f"Final Class {final_class} (Score: {score:.2f} | Sales B, Hits B): Balanced Standard SKU. Moderate sales revenue and moderate pick velocity. Standard EOQ batching with periodic review and standard reorder point.",
+        ("A", "D"): f"Final Class {final_class} (Score: {score:.2f} | Sales A, Hits D): High Dollar, Lumpy Demand. High dollar value tempered by infrequent picks into Class B. Strictly make-to-order (MTO) or contract-on-demand, zero safety stock to avoid tied-up capital.",
+        ("C", "A"): f"Final Class {final_class} (Score: {score:.2f} | Sales C, Hits A): High-Velocity Low-Dollar SKU. High transaction volume elevates this low-dollar item to Class B. Bulk purchasing, visual Kanban replenishment, prevent stockouts on active pick lines.",
+        ("B", "C"): f"Final Class {final_class} (Score: {score:.2f} | Sales B, Hits C): Moderate Sales, Slow Velocity. Low pick frequency. Consolidate order cycles, monitor holding costs, review reorder point quarterly.",
+        ("C", "B"): f"Final Class {final_class} (Score: {score:.2f} | Sales C, Hits B): Moderate Activity, Low Revenue. Low financial risk. Standard periodic review with simplified controls, larger order batches.",
+        ("B", "D"): f"Final Class {final_class} (Score: {score:.2f} | Sales B, Hits D): Moderate Revenue, Infrequent Demand. Reorder upon customer order confirmation or maintain low min-max buffer stock.",
+        ("D", "A"): f"Final Class {final_class} (Score: {score:.2f} | Sales D, Hits A): Low Dollar, High Velocity (Consumables/Fasteners). Inexpensive supplies ordered frequently. Two-bin visual Kanban replenishment, large order quantities to minimize ordering overhead.",
+        ("C", "C"): f"Final Class {final_class} (Score: {score:.2f} | Sales C, Hits C): Slow Moving, Low Revenue. Order-up-to periodic review with wide review intervals, bulk safety stock.",
+        ("D", "B"): f"Final Class {final_class} (Score: {score:.2f} | Sales D, Hits B): Minor Volume SKU. Negligible revenue impact. Reorder in small batches only as needed, store in upper/remote racks.",
+        ("C", "D"): f"Final Class {final_class} (Score: {score:.2f} | Sales C, Hits D): Low Revenue, Infrequent Pick. Candidate for catalog rationalization, minimum stocking, or vendor drop-shipment.",
+        ("D", "C"): f"Final Class {final_class} (Score: {score:.2f} | Sales D, Hits C): Slow Moving, Low Value. Review for potential phase-out, consolidate with substitute SKUs.",
+        ("D", "D"): f"Final Class {final_class} (Score: {score:.2f} | Sales D, Hits D): Dead Stock / Obsolete Candidates. Minimal revenue and near-zero pick velocity. Candidate for immediate rationalization, liquidation, or inventory purge."
     }
-    return insight_map.get((sales_class, hits_class), f"Manage SKU based on dual profile: Sales Class {sales_class} and Hits Class {hits_class}.")
+    return insight_map.get(
+        (sales_class, hits_class),
+        f"Final Class {final_class} (Score: {score:.2f}): Manage SKU based on combined profile: Sales Class {sales_class} and Hits Class {hits_class}."
+    )
+
+
+def safe_format_score(val: Any) -> str:
+    """Safely format a numerical score to 2 decimal places."""
+    if val is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return ""
+    except ImportError:
+        pass
+    s = str(val).strip()
+    if not s:
+        return ""
+    try:
+        return f"{float(s):.2f}"
+    except (ValueError, TypeError):
+        return s
 
 
 def safe_format_currency(val: Any) -> str:
@@ -538,8 +590,12 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         df_sales_sorted["Percentage Sales ($)"] = 0.0
     df_sales_sorted["Sales ($) Classification"] = df_sales_sorted["Percentage Sales ($)"].apply(assign_class)
 
+    # Convert classification to numerical score: A = 4, B = 3, C = 2, D = 1
+    score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
+    df_sales_sorted["Sales ($) Score"] = df_sales_sorted["Sales ($) Classification"].map(score_map).astype(int)
+
     # Dedicated Sales calculation breakdown table
-    sales_calc_cols = [c for c in [name_col, sales_col, "Cumulative Sales ($) Total", "Percentage Sales ($)", "Sales ($) Classification"] if c in df_sales_sorted.columns]
+    sales_calc_cols = [c for c in [name_col, sales_col, "Cumulative Sales ($) Total", "Percentage Sales ($)", "Sales ($) Classification", "Sales ($) Score"] if c in df_sales_sorted.columns]
     sales_calc_df = df_sales_sorted[sales_calc_cols].copy()
 
     # =========================================================================
@@ -557,8 +613,11 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         df_hits_sorted["Percentage Hits"] = 0.0
     df_hits_sorted["Hits Classification"] = df_hits_sorted["Percentage Hits"].apply(assign_class)
 
+    # Convert classification to numerical score: A = 4, B = 3, C = 2, D = 1
+    df_hits_sorted["Hits Score"] = df_hits_sorted["Hits Classification"].map(score_map).astype(int)
+
     # Dedicated Hits calculation breakdown table
-    hits_calc_cols = [c for c in [name_col, hits_col, "Cumulative Hits Total", "Percentage Hits", "Hits Classification"] if c in df_hits_sorted.columns]
+    hits_calc_cols = [c for c in [name_col, hits_col, "Cumulative Hits Total", "Percentage Hits", "Hits Classification", "Hits Score"] if c in df_hits_sorted.columns]
     hits_calc_df = df_hits_sorted[hits_calc_cols].copy()
 
     # =========================================================================
@@ -567,10 +626,42 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
     # =========================================================================
     df_final = df_result.copy()
     df_final["Sales ($) Classification"] = df_sales_sorted["Sales ($) Classification"].loc[df_final.index]
+    df_final["Sales ($) Score"] = df_sales_sorted["Sales ($) Score"].loc[df_final.index].astype(int)
     df_final["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_final.index]
-    df_final["Multicriteria Classification"] = df_final["Sales ($) Classification"] + "-" + df_final["Hits Classification"]
+    df_final["Hits Score"] = df_hits_sorted["Hits Score"].loc[df_final.index].astype(int)
+
+    # Weighted Score calculation:
+    # Combined Weighted Score = 0.65(Sales ($) Score) + 0.35(Hits Score)
+    df_final["Combined Weighted Score"] = (
+        0.65 * df_final["Sales ($) Score"] + 0.35 * df_final["Hits Score"]
+    ).round(2)
+
+    # Final Inventory Classification criteria:
+    # A = 4.00 to 3.25
+    # B = 3.24 to 2.50
+    # C = 2.49 to 1.75
+    # D = <1.75
+    def assign_final_class(score: float) -> str:
+        if score >= 3.25:
+            return "A"
+        elif score >= 2.50:
+            return "B"
+        elif score >= 1.75:
+            return "C"
+        else:
+            return "D"
+
+    df_final["Final Inventory Classification"] = df_final["Combined Weighted Score"].apply(assign_final_class)
+    df_final["Multicriteria Classification"] = df_final["Final Inventory Classification"]
+    df_final["Multicriteria Class"] = df_final["Sales ($) Classification"] + "-" + df_final["Hits Classification"]
+
     df_final["Managerial Insight"] = df_final.apply(
-        lambda r: get_multicriteria_managerial_insight(r["Sales ($) Classification"], r["Hits Classification"]),
+        lambda r: get_multicriteria_managerial_insight(
+            r["Sales ($) Classification"],
+            r["Hits Classification"],
+            r["Final Inventory Classification"],
+            r["Combined Weighted Score"]
+        ),
         axis=1
     )
     # Drop internal clean columns
@@ -588,16 +679,36 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
     df_combined["Cumulative Hits"] = df_combined["Cumulative Hits Total"]
     df_combined["Hits Percentage"] = df_combined["Percentage Hits"]
     df_combined["Hits Classification"] = df_hits_sorted["Hits Classification"].loc[df_combined.index]
+    df_combined["Sales ($) Score"] = df_sales_sorted["Sales ($) Score"].loc[df_combined.index].astype(int)
+    df_combined["Hits Score"] = df_hits_sorted["Hits Score"].loc[df_combined.index].astype(int)
+    df_combined["Combined Weighted Score"] = (
+        0.65 * df_combined["Sales ($) Score"] + 0.35 * df_combined["Hits Score"]
+    ).round(2)
+    df_combined["Final Inventory Classification"] = df_combined["Combined Weighted Score"].apply(assign_final_class)
     df_combined["Multicriteria Class"] = df_combined["Sales ($) Classification"] + "-" + df_combined["Hits Classification"]
-    df_combined["Multicriteria Classification"] = df_combined["Multicriteria Class"]
+    df_combined["Multicriteria Classification"] = df_combined["Final Inventory Classification"]
     df_combined["Managerial Insight"] = df_combined.apply(
-        lambda r: get_multicriteria_managerial_insight(r["Sales ($) Classification"], r["Hits Classification"]),
+        lambda r: get_multicriteria_managerial_insight(
+            r["Sales ($) Classification"],
+            r["Hits Classification"],
+            r["Final Inventory Classification"],
+            r["Combined Weighted Score"]
+        ),
         axis=1
     )
     df_combined = df_combined.drop(columns=["_sales_clean", "_hits_clean"], errors="ignore")
 
     # =========================================================================
-    # 5. CLASS SUMMARY DISTRIBUTION TABLES
+    # 5. DEDICATED WEIGHTED CALCULATION BREAKDOWN TABLE
+    # =========================================================================
+    weighted_cols = [c for c in [name_col, "Sales ($) Classification", "Sales ($) Score", "Hits Classification", "Hits Score", "Combined Weighted Score", "Final Inventory Classification"] if c in df_final.columns]
+    weighted_calc_df = df_final[weighted_cols].sort_values(
+        by=["Combined Weighted Score", "Sales ($) Score", "Hits Score"],
+        ascending=[False, False, False]
+    ).copy()
+
+    # =========================================================================
+    # 6. CLASS SUMMARY DISTRIBUTION TABLES
     # =========================================================================
     classes = ["A", "B", "C", "D"]
     total_items = len(df_result)
@@ -666,8 +777,44 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         })
     hits_summary_df = pd.DataFrame(hits_summary_rows)
 
+    # Final Inventory Classification summary table (Weighted Scoring)
+    final_policy_map = {
+        "A": "High-Priority Core SKUs: Continuous daily review, automated replenishment, high service levels (98-99%), golden-zone slotting.",
+        "B": "Moderate-Priority Active SKUs: Standard periodic review, EOQ batching, standard safety stock buffer, automated reordering.",
+        "C": "Low-Priority Support SKUs: Bulk batch ordering, simplified controls, visual Kanban for consumables, periodic review intervals.",
+        "D": "Candidates for Rationalization / Obsolete: Infrequent low-value demand. Review for catalog phase-out, order-to-order procurement, or liquidation."
+    }
+    final_criteria_map = {
+        "A": "4.00 to 3.25",
+        "B": "3.24 to 2.50",
+        "C": "2.49 to 1.75",
+        "D": "< 1.75"
+    }
+    final_summary_rows = []
+    for cls in classes:
+        subset = df_final[df_final["Final Inventory Classification"] == cls]
+        cnt = len(subset)
+        pct_items = (cnt / total_items * 100.0) if total_items > 0 else 0.0
+        cls_sales = float(df_result.loc[subset.index, "_sales_clean"].sum()) if "_sales_clean" in df_result.columns else 0.0
+        pct_sales = (cls_sales / total_sales * 100.0) if total_sales > 0 else 0.0
+        cls_hits = float(df_result.loc[subset.index, "_hits_clean"].sum()) if "_hits_clean" in df_result.columns else 0.0
+        pct_hits = (cls_hits / total_hits * 100.0) if total_hits > 0 else 0.0
+
+        final_summary_rows.append({
+            "Final Class": cls,
+            "Score Range": final_criteria_map[cls],
+            "Item Count": cnt,
+            "% of Items": round(pct_items, 1),
+            "Total Sales ($)": cls_sales,
+            "% of Sales": round(pct_sales, 1),
+            "Total Hits": cls_hits,
+            "% of Hits": round(pct_hits, 1),
+            "Strategic Policy": final_policy_map[cls]
+        })
+    final_summary_df = pd.DataFrame(final_summary_rows)
+
     # =========================================================================
-    # 6. 4x4 MULTICRITERIA CROSS-TABULATION MATRIX
+    # 7. 4x4 MULTICRITERIA CROSS-TABULATION MATRIX
     # =========================================================================
     base_matrix = pd.crosstab(
         df_final["Sales ($) Classification"],
@@ -692,6 +839,7 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         "final_table": df_final,            # Clean final table in original order
         "sales_calc_df": sales_calc_df,    # Calculation table sorted by Sales ($)
         "hits_calc_df": hits_calc_df,      # Calculation table sorted by Hits
+        "weighted_calc_df": weighted_calc_df, # Calculation table sorted by Weighted Score
         "num_rows": int(df_final.shape[0]),
         "num_cols": int(df_final.shape[1]),
         "column_names": list(df_final.columns),
@@ -701,6 +849,7 @@ def classify_inventory_dataframe(df: Any) -> Dict[str, Any]:
         "class_summary": sales_summary_df,
         "sales_summary": sales_summary_df,
         "hits_summary": hits_summary_df,
+        "final_summary": final_summary_df,
         "crosstab_matrix": crosstab_matrix,
         "crosstab_with_totals": crosstab_with_totals,
         "sales_col": sales_col,
@@ -717,11 +866,32 @@ def try_run_streamlit(agent: InventoryAgent):
         return False
 
     # Check if streamlit is active in the call stack
-    try:
-        import streamlit.runtime.scriptrunner as scriptrunner
-        is_streamlit = scriptrunner.get_script_run_ctx() is not None
-    except Exception:
-        is_streamlit = False
+    is_streamlit = False
+    if getattr(st, "_is_running_with_streamlit", False):
+        is_streamlit = True
+    else:
+        try:
+            import streamlit.runtime.scriptrunner as scriptrunner
+            if scriptrunner.get_script_run_ctx() is not None:
+                is_streamlit = True
+        except Exception:
+            pass
+        if not is_streamlit:
+            try:
+                from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+                if get_script_run_ctx() is not None:
+                    is_streamlit = True
+            except Exception:
+                pass
+        if not is_streamlit:
+            try:
+                from streamlit.scriptrunner import get_script_run_ctx
+                if get_script_run_ctx() is not None:
+                    is_streamlit = True
+            except Exception:
+                pass
+        if not is_streamlit and any("streamlit" in str(arg).lower() for arg in sys.argv):
+            is_streamlit = True
 
     if not is_streamlit:
         return False
@@ -890,33 +1060,35 @@ def try_run_streamlit(agent: InventoryAgent):
                 avg_sale = class_res['total_sales'] / class_res['total_items'] if class_res['total_items'] > 0 else 0.0
                 kpi_row1[3].metric("Average Sales / SKU", f"${avg_sale:,.2f}")
 
-            # 2. Executive KPIs Row 2: Classification Highlights for BOTH Sales ($) and Hits
+            # 2. Executive KPIs Row 2: Final Multicriteria Classification Highlights
             kpi_row2 = st.columns(4)
+            final_summary = class_res["final_summary"]
+
+            f_a = final_summary[final_summary["Final Class"] == "A"]
+            f_a_cnt = int(f_a["Item Count"].values[0]) if len(f_a) > 0 else 0
+            f_a_pct = float(f_a["% of Sales"].values[0]) if len(f_a) > 0 else 0.0
+            kpi_row2[0].metric("Final Class A (4.00 - 3.25)", f"{f_a_cnt} items", f"{f_a_pct:.1f}% of Sales")
+
+            f_b = final_summary[final_summary["Final Class"] == "B"]
+            f_b_cnt = int(f_b["Item Count"].values[0]) if len(f_b) > 0 else 0
+            f_b_pct = float(f_b["% of Sales"].values[0]) if len(f_b) > 0 else 0.0
+            kpi_row2[1].metric("Final Class B (3.24 - 2.50)", f"{f_b_cnt} items", f"{f_b_pct:.1f}% of Sales")
+
+            f_c = final_summary[final_summary["Final Class"] == "C"]
+            f_c_cnt = int(f_c["Item Count"].values[0]) if len(f_c) > 0 else 0
+            f_c_pct = float(f_c["% of Sales"].values[0]) if len(f_c) > 0 else 0.0
+            kpi_row2[2].metric("Final Class C (2.49 - 1.75)", f"{f_c_cnt} items", f"{f_c_pct:.1f}% of Sales")
+
+            f_d = final_summary[final_summary["Final Class"] == "D"]
+            f_d_cnt = int(f_d["Item Count"].values[0]) if len(f_d) > 0 else 0
+            f_d_pct = float(f_d["% of Sales"].values[0]) if len(f_d) > 0 else 0.0
+            kpi_row2[3].metric("Final Class D (< 1.75)", f"{f_d_cnt} items", f"{f_d_pct:.1f}% of Sales")
+
+            # 3. Side-by-Side Sales ($) and Hits Classification Summary Tables
+            col_s, col_h = st.columns(2)
             sales_summary = class_res["sales_summary"]
             hits_summary = class_res["hits_summary"]
 
-            s_a = sales_summary[sales_summary["Class"] == "A"]
-            s_a_cnt = int(s_a["Item Count"].values[0]) if len(s_a) > 0 else 0
-            s_a_pct = float(s_a["% of Sales"].values[0]) if len(s_a) > 0 else 0.0
-            kpi_row2[0].metric("Sales Class A", f"{s_a_cnt} items", f"{s_a_pct:.1f}% of Sales")
-
-            s_b = sales_summary[sales_summary["Class"] == "B"]
-            s_b_cnt = int(s_b["Item Count"].values[0]) if len(s_b) > 0 else 0
-            s_b_pct = float(s_b["% of Sales"].values[0]) if len(s_b) > 0 else 0.0
-            kpi_row2[1].metric("Sales Class B", f"{s_b_cnt} items", f"{s_b_pct:.1f}% of Sales")
-
-            h_a = hits_summary[hits_summary["Class"] == "A"]
-            h_a_cnt = int(h_a["Item Count"].values[0]) if len(h_a) > 0 else 0
-            h_a_pct = float(h_a["% of Hits"].values[0]) if len(h_a) > 0 else 0.0
-            kpi_row2[2].metric("Hits Class A", f"{h_a_cnt} items", f"{h_a_pct:.1f}% of Hits")
-
-            h_b = hits_summary[hits_summary["Class"] == "B"]
-            h_b_cnt = int(h_b["Item Count"].values[0]) if len(h_b) > 0 else 0
-            h_b_pct = float(h_b["% of Hits"].values[0]) if len(h_b) > 0 else 0.0
-            kpi_row2[3].metric("Hits Class B", f"{h_b_cnt} items", f"{h_b_pct:.1f}% of Hits")
-
-            # 3. Two Side-by-Side Classification Summary Distribution Tables
-            col_s, col_h = st.columns(2)
             with col_s:
                 st.markdown("#### 🏷️ Sales ($) Classification Summary (A, B, C, D)")
                 st.caption("Criteria: **A** (0% < x ≤ 60%) | **B** (60% < x ≤ 80%) | **C** (80% < x ≤ 90%) | **D** (90% < x)")
@@ -937,25 +1109,41 @@ def try_run_streamlit(agent: InventoryAgent):
                 hits_disp["Cumulative Hits %"] = hits_disp["Cumulative Hits %"].apply(safe_format_pct)
                 st.dataframe(hits_disp, use_container_width=True, hide_index=True)
 
-            # 4. Multicriteria Cross-Tabulation Matrix & Policy Guide
-            st.markdown("### 🔲 Multicriteria Matrix: Sales ($) Class × Hits Class")
+            # Final Multicriteria Inventory Classification Summary Table
+            st.markdown("#### 🏆 Final Multicriteria Inventory Classification Summary (Weighted Score)")
+            st.caption("Combined Weighted Score = 0.65 × Sales ($) Score + 0.35 × Hits Score (Scores: A=4, B=3, C=2, D=1)")
+            final_disp = final_summary.copy()
+            final_disp["Total Sales ($)"] = final_disp["Total Sales ($)"].apply(safe_format_currency)
+            final_disp["Total Hits"] = final_disp["Total Hits"].apply(safe_format_hits)
+            final_disp["% of Items"] = final_disp["% of Items"].apply(safe_format_pct)
+            final_disp["% of Sales"] = final_disp["% of Sales"].apply(safe_format_pct)
+            final_disp["% of Hits"] = final_disp["% of Hits"].apply(safe_format_pct)
+            st.dataframe(final_disp, use_container_width=True, hide_index=True)
+
+            # 4. Multicriteria Cross-Tabulation Matrix & Scoring Guide
+            st.markdown("### 🔲 Multicriteria Matrix & Weighted Scoring Model")
             m_col1, m_col2 = st.columns([1, 1])
             with m_col1:
                 st.markdown("**SKU Distribution (Sales ($) Class Rows × Hits Class Columns)**")
                 st.dataframe(class_res["crosstab_with_totals"], use_container_width=True)
 
             with m_col2:
-                with st.expander("📖 Managerial Policy Guide for Both Criteria (Quadrant Breakdown)", expanded=True):
+                with st.expander("📖 Weighted Scoring & Classification Rules", expanded=True):
                     st.markdown(
-                        "- **A-A (High Sales, High Hits):** Top-Priority Fast Movers. Daily continuous review, automated replenishment, tight supplier integration, 98-99% service level, golden-zone warehouse slotting.\n"
-                        "- **A-D (High Sales, Low Hits):** High Dollar, Lumpy Demand. Capital-intensive slow mover. Strictly make-to-order (MTO), strict purchasing approval, zero buffer stock to avoid tied-up working capital.\n"
-                        "- **D-A (Low Sales, High Hits):** Cheap Fast Movers (Fasteners/Consumables). Inexpensive parts with frequent picks. Bulk ordering, two-bin visual Kanban replenishment, high service level (minimal capital cost).\n"
-                        "- **D-D (Low Sales, Low Hits):** Dead Stock / Obsolete Candidates. Minimal revenue and near-zero velocity. Candidate for catalog rationalization, clearance liquidation, or order-to-order sourcing."
+                        "**Equation:**\n"
+                        "$$\\text{Combined Weighted Score} = 0.65 \\times (\\text{Sales (\\$) Score}) + 0.35 \\times (\\text{Hits Score})$$\n\n"
+                        "**Numerical Score Assignments:**\n"
+                        "- Class A = **4** | Class B = **3** | Class C = **2** | Class D = **1**\n\n"
+                        "**Final Inventory Classification Cutoffs:**\n"
+                        "- **Class A:** 4.00 to 3.25 *(e.g., A-A=4.00, A-B=3.65, B-A=3.35, A-C=3.30)*\n"
+                        "- **Class B:** 3.24 to 2.50 *(e.g., B-B=3.00, A-D=2.95, C-A=2.70, B-C=2.65)*\n"
+                        "- **Class C:** 2.49 to 1.75 *(e.g., C-B=2.35, B-D=2.30, D-A=2.05, C-C=2.00)*\n"
+                        "- **Class D:** < 1.75 *(e.g., D-B=1.70, C-D=1.65, D-C=1.35, D-D=1.00)*"
                     )
 
             # 5. Final Classified Inventory Table (Maintains original uploaded order - no specific sorting!)
             st.markdown("### 📑 Final Classified Inventory Table")
-            st.caption("Maintains original uploaded catalog order. Displays Sales ($) Classification, Hits Classification, Multicriteria Classification, and Managerial Insights advising on both criteria.")
+            st.caption("Maintains original uploaded catalog order. Displays Sales ($) Classification, Hits Classification, Numerical Scores, Combined Weighted Score, Final Inventory Classification, and Managerial Insights.")
 
             final_table = class_res["final_table"].copy()
             sales_c = class_res["sales_col"]
@@ -966,6 +1154,8 @@ def try_run_streamlit(agent: InventoryAgent):
                 final_display[sales_c] = final_display[sales_c].apply(safe_format_currency)
             if hits_c in final_display.columns:
                 final_display[hits_c] = final_display[hits_c].apply(safe_format_hits)
+            if "Combined Weighted Score" in final_display.columns:
+                final_display["Combined Weighted Score"] = final_display["Combined Weighted Score"].apply(safe_format_score)
             if "Unit Cost" in final_display.columns:
                 final_display["Unit Cost"] = final_display["Unit Cost"].apply(safe_format_currency)
             if "Inventory Value" in final_display.columns:
@@ -979,16 +1169,17 @@ def try_run_streamlit(agent: InventoryAgent):
                 data=csv_final,
                 file_name="final_classified_inventory.csv",
                 mime="text/csv",
-                help="Export the catalog in original order with Sales ($), Hits, and Multicriteria Classifications"
+                help="Export the catalog in original order with Sales ($), Hits, Scores, Combined Weighted Score, and Final Inventory Classification"
             )
 
-            # 6. Separate Calculation Breakdown Tables (Sorted from Largest to Smallest)
-            st.markdown("### 🧮 Pareto Calculation Tables (Sorted Largest to Smallest)")
-            st.caption("Sorting from largest to smallest is performed strictly for the cumulative calculations for Sales ($) and Hits.")
+            # 6. Separate Calculation Breakdown Tables
+            st.markdown("### 🧮 Pareto & Weighted Scoring Calculation Tables")
+            st.caption("Detailed calculations: sorting from largest to smallest for Pareto math, plus the combined weighted scoring table.")
 
-            calc_tab1, calc_tab2 = st.tabs([
+            calc_tab1, calc_tab2, calc_tab3 = st.tabs([
                 "🏷️ Sales ($) Pareto Calculations (Sorted by Sales)",
-                "🎯 Hits Pareto Calculations (Sorted by Hits)"
+                "🎯 Hits Pareto Calculations (Sorted by Hits)",
+                "⚖️ Combined Weighted Scoring Table (Sorted by Score)"
             ])
 
             with calc_tab1:
@@ -1010,6 +1201,12 @@ def try_run_streamlit(agent: InventoryAgent):
                 if "Percentage Hits" in hits_calc_display.columns:
                     hits_calc_display["Percentage Hits"] = hits_calc_display["Percentage Hits"].apply(safe_format_pct)
                 st.dataframe(hits_calc_display, use_container_width=True, hide_index=True)
+
+            with calc_tab3:
+                weighted_calc_display = class_res["weighted_calc_df"].copy()
+                if "Combined Weighted Score" in weighted_calc_display.columns:
+                    weighted_calc_display["Combined Weighted Score"] = weighted_calc_display["Combined Weighted Score"].apply(safe_format_score)
+                st.dataframe(weighted_calc_display, use_container_width=True, hide_index=True)
 
             # 7. Category Breakdown (if Category column exists in CSV)
             if "Category" in df_uploaded.columns and ("Units" in df_uploaded.columns or sales_c in df_uploaded.columns):
